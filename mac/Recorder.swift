@@ -1144,6 +1144,8 @@ final class Onboarding: ObservableObject {
     func go(_ s: Int) { step = s; UserDefaults.standard.set(s, forKey: "onboardingStep") }
     func requestScreen() {
         _ = CGRequestScreenCaptureAccess()
+        // ניסיון גישה אמיתי: רושם את טימי ברשימת ההרשאות של המערכת
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { _, _ in }
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
     }
     func requestMic() {
@@ -1305,6 +1307,8 @@ struct OnboardingView: View {
                 Text("1.  לחץ \"פתח הגדרות\"").foregroundColor(.white.opacity(0.75))
                 Text("2.  הדלק את המתג ליד \"טימי\" (אם מבקשים, הכנס סיסמה)").foregroundColor(.white.opacity(0.75))
                 Text("3.  חזור לכאן ולחץ \"הפעל את טימי מחדש\"").foregroundColor(.white.opacity(0.75))
+                Text("טימי לא ברשימה? לחץ על + מתחת לרשימה ובחר את טימי מתיקיית היישומים.")
+                    .font(.system(size: 12)).foregroundColor(amber.opacity(0.85))
             }.font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
             status(o.screenOK, "ההרשאה פעילה", "עוד לא פעילה")
             if o.screenOK {
