@@ -30,6 +30,10 @@ func loadConfig() -> [String: Any] {
     return o
 }
 func saveConfig(_ updates: [String: Any]) {
+    if FileManager.default.fileExists(atPath: configURL.path) && loadConfig().isEmpty,
+       let raw = try? Data(contentsOf: configURL), raw.count > 2 {
+        NSLog("config.json לא תקין, לא שומר כדי לא למחוק הגדרות"); return
+    }
     var c = loadConfig()
     for (k, v) in updates { c[k] = v }
     try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
@@ -374,36 +378,52 @@ let colorNames: [(String, String)] = [
     ("ורוד", "#EC4899"), ("סגול", "#A855F7"), ("לילך", "#C4B5FD"), ("לבן", "#F5F5F5"), ("אפור", "#9CA3AF"),
     ("blue", "#3B82F6"), ("green", "#22C55E"), ("purple", "#A855F7"), ("pink", "#EC4899"), ("red", "#EF4444"),
     ("yellow", "#FACC15"), ("teal", "#14B8A6"), ("gold", "#D4AF37")]
+// מילה שלמה בעברית, עם תחיליות אפשריות (ה/ל/ב/ו/ש), לא חלק ממילה אחרת ("קרקע" ≠ "רקע", "ordered" ≠ "red")
+func hasWord(_ l: String, _ w: String, prefixes: Bool = true) -> Bool {
+    let pre = prefixes ? "[הלבוש]?" : ""
+    return l.range(of: "(^|[\\s,.!?:\"'()])" + pre + NSRegularExpression.escapedPattern(for: w) + "($|[\\s,.!?:\"'()])", options: .regularExpression) != nil
+}
+func colorIn(_ l: String) -> String? {
+    if let r = l.range(of: "(^|\\s)#[0-9a-f]{6}($|\\s)", options: .regularExpression) {
+        return String(l[r]).trimmingCharacters(in: .whitespaces).uppercased()
+    }
+    if hasWord(l, "כתום") || hasWord(l, "orange", prefixes: false) { return defaultAccent }
+    if hasWord(l, "שחור") || hasWord(l, "black", prefixes: false) { return "#000000" }
+    for (name, hex) in colorNames {
+        let english = name.range(of: "^[a-z]+$", options: .regularExpression) != nil
+        if hasWord(l, name, prefixes: !english) || (!english && (hasWord(l, name + "ה") || hasWord(l, name + "ים") || hasWord(l, name + "ות"))) { return hex }
+    }
+    return nil
+}
+// הוראת מראה רק כשהיא באמת על האפליקציה. הוראה שמדברת על הסיכום/משימות/נקודות היא הוראה לסיכום, גם אם יש בה צבע
 func isAppearanceInstruction(_ t: String) -> Bool {
     let l = t.lowercased()
-    let keys = ["צבע", "רקע", "עיניים", "עין", "אנימצי", "הנפש", "מצמ", "תזוז", "מראה", "color", "background", "eyes", "animation"]
-    if keys.contains(where: { l.contains($0) }) || l.range(of: "#[0-9a-f]{3,6}", options: .regularExpression) != nil { return true }
-    // פועל + שם צבע ("תחזיר לכתום", "תשנה לירוק"); בלי פועל ("תסמן באדום") זו הוראה לסיכום
-    let verbs = ["תחליף", "תשנה", "תעשה", "שנה", "החלף", "תחזיר", "החזר"]
-    let colors = colorNames.map { $0.0 } + ["כתום", "שחור", "orange", "black"]
-    return verbs.contains(where: { l.contains($0) }) && colors.contains(where: { l.contains($0) })
+    let summaryWords = ["סיכום", "הסיכום", "סעיף", "נקודות", "הנקודות", "משימות", "המשימות", "טבלה", "החלטות", "הודעה", "וואטסאפ", "תמלול", "שיחה", "שיחות", "לקוח", "list", "table", "summary"]
+    let explicitApp = ["טימי", "האפליקציה", "אפליקציה"].contains { l.contains($0) }
+    if !explicitApp && summaryWords.contains(where: { hasWord(l, $0, prefixes: false) || l.contains(" " + $0) }) { return false }
+    let looks = ["צבע", "רקע", "עיניים", "אנימציה", "אנימציות", "מצמוץ", "מראה"].contains { hasWord(l, $0) }
+        || ["color", "background", "eyes", "animation", "animations"].contains { hasWord(l, $0, prefixes: false) }
+    if looks || explicitApp && colorIn(l) != nil { return true }
+    // פקודה קצרה עם צבע ("כחול", "תשנה לירוק", "תחזיר לכתום", "make it blue")
+    return l.split(separator: " ").count <= 4 && colorIn(l) != nil
 }
 func isColorInstruction(_ t: String) -> Bool { isAppearanceInstruction(t) }
 // מפענח הוראת מראה בלי Claude. מחזיר שינויים, או nil אם צריך את Claude (ניסוח יצירתי)
 func parseAppearance(_ t: String) -> [String: Any]? {
     let l = t.lowercased()
-    let has = { (ws: [String]) in ws.contains { l.contains($0) } }
-    if has(["אפס", "תאפס", "ברירת מחדל", "כמו שהיה", "תחזיר הכל", "reset"]) && has(["מראה", "הכל", "צבעים", "עיצוב", "reset"]) { return ["reset": true] }
-    if has(["תחזיר", "החזר"]) && has(["כתום", "orange", "מקורי"]) && !has(["רקע", "עיניים", "עין"]) { return ["accent_color": defaultAccent] }
+    let has = { (ws: [String]) in ws.contains { hasWord(l, $0) } }
+    if (has(["אפס", "תאפס", "reset"]) || l.contains("ברירת מחדל") || l.contains("כמו שהיה") || l.contains("תחזיר הכל"))
+        && (has(["מראה", "הכל", "צבעים", "עיצוב"]) || l.contains("ברירת מחדל") || l.contains("כמו שהיה")) { return ["reset": true] }
     var out: [String: Any] = [:]
-    if has(["אנימצי", "הנפש", "מצמ", "תזוז", "animation"]) {
+    if has(["אנימציה", "אנימציות", "מצמוץ", "animation", "animations"]) {
         if has(["תוריד", "בלי", "תכבה", "תבטל", "תעצור", "off"]) { out["animations"] = false }
-        else if has(["תחזיר", "תדליק", "תפעיל"]) { out["animations"] = true }
+        else if has(["תחזיר", "תדליק", "תפעיל", "on"]) { out["animations"] = true }
     }
-    var hex: String?
-    if let r = l.range(of: "#[0-9a-f]{6}|#[0-9a-f]{3}", options: .regularExpression) { hex = String(l[r]).uppercased() }
-    else if has(["כתום", "orange"]) { hex = defaultAccent }
-    else if has(["שחור", "black"]) { hex = "#000000" }
-    else { hex = colorNames.first(where: { l.contains($0.0) })?.1 }
-    if let hex {
-        if has(["רקע", "background"]) { out["background_color"] = hex }
-        else if has(["עיניים", "עין", "eyes", "eye"]) { out["eye_color"] = hex }
-        else { out["accent_color"] = hex }
+    let target: String = has(["רקע", "background"]) ? "background_color" : (has(["עיניים", "eyes"]) ? "eye_color" : "accent_color")
+    if has(["מקורי", "מקוריים", "מקוריות"]) {
+        out[target] = target == "background_color" ? "#000000" : (target == "eye_color" ? "" : defaultAccent)
+    } else if let hex = colorIn(l) {
+        out[target] = hex
     }
     return out.isEmpty ? nil : out
 }
@@ -1042,7 +1062,10 @@ final class ImproveModel: ObservableObject {
     func remove(_ i: Int) { guard items.indices.contains(i) else { return }; items.remove(at: i); save() }
     func applyColor(_ hex: String?) { applyAppearance(hex == nil ? ["reset": true] : ["accent_color": hex!]) }
     func askClaudeForAppearance(_ t: String) {
-        guard let claude = Onboarding.shared?.claudePath() else { status = .failed("לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה"); return }
+        guard let claude = Onboarding.shared?.claudePath() else {
+            if !items.contains(t) { items.append(t); save() }
+            status = .done("נשמר כהוראה לנקודות ולסיכומים"); return
+        }
         status = .working
         let prompt = "המשתמש כתב הוראה לשינוי המראה של אפליקציה כהה (רקע שחור, טקסט לבן, צבע הדגשה כתום): \"" + t + "\". החזר JSON בלבד, עם רק המפתחות שהמשתמש ביקש לשנות מתוך: accent_color (#RRGGBB, כפתורים והדגשות), eye_color (#RRGGBB, העיניים והפה של הדמות), background_color (#RRGGBB, כהה מספיק לטקסט לבן), animations (true/false), reset (true, לחזרה לברירת המחדל). בלי שום טקסט נוסף."
         DispatchQueue.global().async {
@@ -1069,7 +1092,10 @@ final class ImproveModel: ObservableObject {
             }
             DispatchQueue.main.async {
                 if let changes { self.applyAppearance(changes) }
-                else { self.status = .failed("לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה") }
+                else if !self.items.contains(t) {
+                    self.items.append(t); self.save()
+                    self.status = .done("נשמר כהוראה לנקודות ולסיכומים")
+                } else { self.status = .failed("לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה") }
             }
         }
     }
@@ -1085,6 +1111,7 @@ final class ImproveModel: ObservableObject {
     }
     // מחיל את ההוראות על הסיכום האחרון (live.py --restyle)
     func improveLast() {
+        guard status != .working else { return }
         if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { add() }
         guard !items.isEmpty else { status = .failed("קודם תכתוב מה לשפר"); return }
         guard let md = lastSummary() else { status = .failed("עוד אין שיחות שמורות"); return }
@@ -1096,9 +1123,11 @@ final class ImproveModel: ObservableObject {
             let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             DispatchQueue.main.async {
                 if text.contains("\"changed\": true") {
-                    self.status = .done("שופר: " + md.deletingPathExtension().lastPathComponent)
+                    self.status = .done("שופר: " + callTitle(md))
                     NSWorkspace.shared.activateFileViewerSelecting([md])
-                } else { self.status = .failed("לא הצלחתי לשפר, בדוק שה-Claude מחובר") }
+                } else if text.contains("\"changed\": false") {
+                    self.status = .failed("הסיכום לא השתנה: Claude לא הצליח לכתוב אותו לפי ההוראות בלי לשבור את המבנה. נסה לנסח אחרת")
+                } else { self.status = .failed("לא הצלחתי להריץ את השיפור. בדוק שה-Claude מחובר") }
             }
         }
         do { try p.run() } catch { status = .failed("שגיאה בהפעלה") }

@@ -9,7 +9,7 @@ base = sys.argv[1]
 APP_DIR = os.environ.get("TIMMY_APP_DIR") or os.path.expanduser("~/Library/Application Support/Timmy")
 def load_config():
     try:
-        with open(os.path.join(APP_DIR, "config.json"), encoding="utf-8") as f: return json.load(f)
+        with open(os.path.join(APP_DIR, "config.json"), encoding="utf-8-sig") as f: return json.load(f)
     except Exception: return {}
 CFG = load_config()
 import shutil as _sh
@@ -20,10 +20,13 @@ OWNER_LINE = f"{OWNER} ({OWNER_DESC})" if OWNER_DESC else OWNER
 NAMES = {0: "צד שני", 1: OWNER}
 
 # ---- "שפר את טימי": הוראות אישיות של המשתמש לנקודות ולסיכום (config: custom_instructions) ----
-CUSTOM = [x.strip() for x in (CFG.get("custom_instructions") or []) if isinstance(x, str) and x.strip()]
+_ci = CFG.get("custom_instructions") or []
+if isinstance(_ci, str): _ci = [_ci]
+CUSTOM = [x.strip() for x in _ci if isinstance(x, str) and x.strip()]
 def custom_block(kind):
     if not CUSTOM: return ""
-    return (f"\n\nהעדפות אישיות של {OWNER} ל{kind} (חובה לכבד; במקרה של סתירה הן גוברות על ההנחיות למעלה):\n"
+    return (f"\n\nהעדפות אישיות של {OWNER} (חלקן לנקודות וחלקן לסיכום הסופי). החל רק את מה שנוגע לנקודות עצמן: אורך, סגנון, ניסוח, אימוג'י, מה להדגיש. "
+            "התעלם מהוראות על מבנה הסיכום הסופי (טבלאות, סעיפים, הודעות וואטסאפ, מספור). בכל מקרה הפלט נשאר רק שורות שמתחילות ב-\"- \":\n"
             + "\n".join("- " + c for c in CUSTOM))
 def _claude_path():
     import shutil, glob
@@ -59,7 +62,14 @@ def restyle(md_text, transcript_text):
     except Exception:
         return md_text
     if out.startswith("```"): out = out.strip("`").split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    return out + "\n" if out.startswith("# ") and "תמלול מלא:" in out else md_text
+    # אימות: כותרת, שורת התאריך ושורת התמלול המקוריות בדיוק, ואורך סביר (לא איבוד תוכן)
+    date_line = next((l for l in md_text.splitlines() if l.startswith("**תאריך:**")), None)
+    tr_line = next((l for l in md_text.splitlines() if l.startswith("תמלול מלא:")), None)
+    ok = (out.startswith("# ")
+          and (date_line is None or date_line in out.splitlines())
+          and (tr_line is None or tr_line in out.splitlines())
+          and len(out) >= 0.4 * len(md_text.strip()))
+    return out + "\n" if ok else md_text
 
 # מצב "שפר סיכום קיים": live.py --restyle <קובץ סיכום.md>
 if base == "--restyle":
@@ -70,6 +80,10 @@ if base == "--restyle":
     new_text = restyle(md_text, tr_text)
     if new_text != md_text:
         open(md_path, "w", encoding="utf-8").write(new_text)
+        _md = os.path.expanduser(CFG.get("meetings_dir") or "")
+        _copy = os.path.join(_md, os.path.basename(md_path)) if _md else ""
+        if _copy and os.path.exists(_copy) and not os.environ.get("LIVE_NO_VAULT"):
+            open(_copy, "w", encoding="utf-8").write(new_text)
         print(json.dumps({"type": "restyled", "txt": md_path, "changed": True}, ensure_ascii=False), flush=True)
     else:
         print(json.dumps({"type": "restyled", "txt": md_path, "changed": False}, ensure_ascii=False), flush=True)
@@ -223,7 +237,11 @@ def update_bullets():
                                  timeout=90, cwd="/tmp").stdout
         except Exception:
             return
-        items = [l.strip()[2:].strip() for l in out.splitlines() if l.strip().startswith("- ")]
+        import re as _r
+        items = []
+        for l in out.splitlines():
+            m = _r.match(r"^\s*(?:[-•*]|\d+[.)])\s+(.+)$", l)   # גם "1." / "•" אם המודל לא שמר על הפורמט
+            if m and m.group(1).strip(): items.append(m.group(1).strip())
         if not items: return
         bullets[:] = items; bullets_state["done_upto"] = n
         with open(base + " נקודות.md", "w") as f:

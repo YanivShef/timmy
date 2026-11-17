@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .venv/
 kie-output/
+qa-improve/
