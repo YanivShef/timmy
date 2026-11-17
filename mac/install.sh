@@ -192,7 +192,15 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 xattr -cr "$APP" 2>/dev/null || true
-codesign --force --deep -s - "$APP" >/dev/null 2>&1 || fail "חתימת האפליקציה נכשלה."
+# חתימה: אם יש במחשב תעודת מפתח של אפל (Developer ID / Apple Development), חותמים איתה,
+# כך שההרשאות (הקלטת מסך, מיקרופון) נשמרות גם אחרי עדכונים. אחרת חתימה מקומית (ad-hoc).
+SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -E '"(Developer ID Application|Apple Development):' | head -1 | awk '{print $2}')"
+if [[ -n "$SIGN_ID" ]] && codesign --force --deep -s "$SIGN_ID" "$APP" >/dev/null 2>&1; then
+  ok "נחתם עם תעודת המפתח שלך (ההרשאות יישמרו בעדכונים)"
+else
+  codesign --force --deep -s - "$APP" >/dev/null 2>&1 || fail "חתימת האפליקציה נכשלה."
+  echo "  ! חתימה מקומית: אחרי כל עדכון של טימי צריך לאשר שוב את הרשאת הקלטת המסך."
+fi
 ok "מותקן: $APP"
 
 # ---------------------------------------------------------------------------
