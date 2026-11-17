@@ -2134,6 +2134,45 @@ struct RTLField: NSViewRepresentable {
     }
 }
 
+// עורך טקסט רב-שורתי בעברית (ימין לשמאל), לעריכת טיוטת ההודעה
+struct RTLTextView: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var focused: Bool
+    var size: CGFloat = 14.5
+    func makeCoordinator() -> Coord { Coord(self) }
+    func makeNSView(context: Context) -> NSScrollView {
+        let sv = NSTextView.scrollableTextView()
+        sv.drawsBackground = false; sv.hasVerticalScroller = true; sv.autohidesScrollers = true
+        let tv = sv.documentView as! NSTextView
+        tv.drawsBackground = false; tv.isRichText = false; tv.allowsUndo = true
+        tv.font = .systemFont(ofSize: size); tv.textColor = .white; tv.insertionPointColor = .white
+        tv.alignment = .right; tv.baseWritingDirection = .rightToLeft
+        let ps = NSMutableParagraphStyle(); ps.alignment = .right; ps.baseWritingDirection = .rightToLeft; ps.lineSpacing = 4
+        tv.defaultParagraphStyle = ps
+        tv.typingAttributes = [.font: NSFont.systemFont(ofSize: size), .foregroundColor: NSColor.white, .paragraphStyle: ps]
+        tv.textContainerInset = NSSize(width: 4, height: 6)
+        tv.delegate = context.coordinator
+        tv.string = text
+        tv.textStorage?.setAttributes(tv.typingAttributes, range: NSRange(location: 0, length: (tv.string as NSString).length))
+        return sv
+    }
+    func updateNSView(_ sv: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let tv = sv.documentView as? NSTextView else { return }
+        if tv.string != text {
+            tv.string = text
+            tv.textStorage?.setAttributes(tv.typingAttributes, range: NSRange(location: 0, length: (tv.string as NSString).length))
+        }
+    }
+    final class Coord: NSObject, NSTextViewDelegate {
+        var parent: RTLTextView
+        init(_ p: RTLTextView) { parent = p }
+        func textDidChange(_ n: Notification) { if let tv = n.object as? NSTextView { parent.text = tv.string } }
+        func textDidBeginEditing(_ n: Notification) { parent.focused = true }
+        func textDidEndEditing(_ n: Notification) { parent.focused = false }
+    }
+}
+
 // MARK: - שיחה שמורה
 
 struct CallItem: Identifiable, Equatable {
@@ -3309,11 +3348,7 @@ struct SendReview: View {
     @ObservedObject var s: SendSession
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(he("הטיוטה (אפשר לערוך לפני השליחה)")).font(.system(size: 12, weight: .semibold)).foregroundColor(.white.opacity(0.5))
-            TextEditor(text: $s.draft)
-                .font(.system(size: 14.5)).foregroundColor(.white).scrollContentBackground(.hidden)
-                .lineSpacing(4).padding(10).frame(height: 190)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.07)))
+            DraftEditor(s: s)
             if let p = s.pdfPath {
                 HStack(spacing: 8) {
                     Image(systemName: "doc.fill").foregroundColor(amber)
@@ -3406,6 +3441,25 @@ struct RecipientStatus: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// טיוטת ההודעה: לחיצה עליה = עריכה (עם סימן עיפרון ומסגרת בעריכה)
+struct DraftEditor: View {
+    @ObservedObject var s: SendSession
+    @State private var editing = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "pencil").font(.system(size: 11, weight: .semibold)).foregroundColor(amber)
+                Text(he(editing ? "עורך… השינויים נשמרים לבד" : "לחץ על ההודעה כדי לערוך אותה")).font(.system(size: 12, weight: .semibold)).foregroundColor(.white.opacity(0.55))
+            }
+            RTLTextView(text: $s.draft, focused: $editing)
+                .frame(height: 190)
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(editing ? 0.10 : 0.07)))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(editing ? amber.opacity(0.8) : Color.white.opacity(0.12), lineWidth: editing ? 1.5 : 1))
+        }
     }
 }
 
