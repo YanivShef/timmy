@@ -377,7 +377,11 @@ let colorNames: [(String, String)] = [
 func isAppearanceInstruction(_ t: String) -> Bool {
     let l = t.lowercased()
     let keys = ["צבע", "רקע", "עיניים", "עין", "אנימצי", "הנפש", "מצמ", "תזוז", "מראה", "color", "background", "eyes", "animation"]
-    return keys.contains { l.contains($0) } || l.range(of: "#[0-9a-f]{3,6}", options: .regularExpression) != nil
+    if keys.contains(where: { l.contains($0) }) || l.range(of: "#[0-9a-f]{3,6}", options: .regularExpression) != nil { return true }
+    // פועל + שם צבע ("תחזיר לכתום", "תשנה לירוק"); בלי פועל ("תסמן באדום") זו הוראה לסיכום
+    let verbs = ["תחליף", "תשנה", "תעשה", "שנה", "החלף", "תחזיר", "החזר"]
+    let colors = colorNames.map { $0.0 } + ["כתום", "שחור", "orange", "black"]
+    return verbs.contains(where: { l.contains($0) }) && colors.contains(where: { l.contains($0) })
 }
 func isColorInstruction(_ t: String) -> Bool { isAppearanceInstruction(t) }
 // מפענח הוראת מראה בלי Claude. מחזיר שינויים, או nil אם צריך את Claude (ניסוח יצירתי)
@@ -385,6 +389,7 @@ func parseAppearance(_ t: String) -> [String: Any]? {
     let l = t.lowercased()
     let has = { (ws: [String]) in ws.contains { l.contains($0) } }
     if has(["אפס", "תאפס", "ברירת מחדל", "כמו שהיה", "תחזיר הכל", "reset"]) && has(["מראה", "הכל", "צבעים", "עיצוב", "reset"]) { return ["reset": true] }
+    if has(["תחזיר", "החזר"]) && has(["כתום", "orange", "מקורי"]) && !has(["רקע", "עיניים", "עין"]) { return ["accent_color": defaultAccent] }
     var out: [String: Any] = [:]
     if has(["אנימצי", "הנפש", "מצמ", "תזוז", "animation"]) {
         if has(["תוריד", "בלי", "תכבה", "תבטל", "תעצור", "off"]) { out["animations"] = false }
