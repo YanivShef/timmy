@@ -2949,8 +2949,14 @@ struct CallsSettingsBar: View {
             ModelPicker(label: "מודל לסיכומים ול-PDF:", value: m.summaryModelID) { m.setSummaryModel($0) }
             ModelPicker(label: "נקודות בזמן השיחה:", value: m.bulletsModelID) { m.setBulletsModel($0) }
             Spacer(minLength: 8)
+            Button(action: { (NSApp.delegate as? AppDelegate)?.openImprove() }) {
+                Text(he("✨ שפר את טימי")).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.black)
+                    .padding(.vertical, 6).padding(.horizontal, 12)
+                    .background(Capsule().fill(amber))
+            }.buttonStyle(.plain)
+                .help("הוראות לנקודות ולסיכומים, צבעים, עיניים, רקע ואנימציות")
             Button(action: { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: nil) }) {
-                Text(he("✨ עצב את ה-PDF")).font(.system(size: 12.5, weight: .medium)).foregroundColor(amber)
+                Text(he("עצב את ה-PDF")).font(.system(size: 12.5, weight: .medium)).foregroundColor(amber)
                     .padding(.vertical, 6).padding(.horizontal, 12)
                     .background(Capsule().stroke(amber.opacity(0.5), lineWidth: 1))
             }.buttonStyle(.plain)
