@@ -12,6 +12,13 @@ def load_config():
         with open(os.path.join(APP_DIR, "config.json"), encoding="utf-8-sig") as f: return json.load(f)
     except Exception: return {}
 CFG = load_config()
+# ---- בחירת מודל (config: summary_model / bullets_model). מותר רק haiku / sonnet / opus, אחרת ברירת המחדל ----
+MODELS = ("haiku", "sonnet", "opus")
+def pick_model(key, default):
+    v = str(CFG.get(key) or "").strip().lower()
+    return v if v in MODELS else default
+SUMMARY_MODEL = pick_model("summary_model", "sonnet")   # סיכום, כותרת, עם מי, משימות, ושכתוב לפי "שפר את טימי"
+BULLETS_MODEL = pick_model("bullets_model", "haiku")    # הנקודות החיות בזמן השיחה
 import shutil as _sh
 FFMPEG = CFG.get("ffmpeg_path") or _sh.which("ffmpeg") or next((p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg") if os.path.exists(p)), "ffmpeg")
 OWNER = (CFG.get("owner_name") or "אני").strip()
@@ -56,7 +63,7 @@ def restyle(md_text, transcript_text):
     claude = _claude_path()
     if not CUSTOM or not claude: return md_text
     try:
-        out = subprocess.run([claude, "-p", "--model", "sonnet"], capture_output=True, text=True, timeout=240, cwd="/tmp",
+        out = subprocess.run([claude, "-p", "--model", SUMMARY_MODEL], capture_output=True, text=True, timeout=240, cwd="/tmp",
                              input=RESTYLE_PROMPT.format(owner=OWNER, custom="\n".join("- " + c for c in CUSTOM),
                                                          md=md_text, transcript=transcript_text[-60000:])).stdout.strip()
     except Exception:
@@ -204,7 +211,7 @@ def speech_frames(a):
     return np.sqrt((a[:n * FR].reshape(n, FR) ** 2).mean(1)) if n else np.zeros(0)
 def ts(s): s = int(s); return f"{s//3600:02d}:{s%3600//60:02d}:{s%60:02d}"
 
-# ---- בולטים חיים: אחרי 15 שניות ואז כל 30, דרך Claude Haiku ----
+# ---- בולטים חיים: אחרי 15 שניות ואז כל 30, דרך Claude (bullets_model, ברירת מחדל Haiku) ----
 def find_claude():
     import shutil, glob
     cands = [CFG.get("claude_path") or "", shutil.which("claude") or "",
@@ -233,7 +240,7 @@ def update_bullets():
         transcript = "\n".join(finals)[-9000:]
         prompt = PROMPT.format(owner=OWNER, owner_line=OWNER_LINE, custom=custom_block("נקודות"), bullets="\n".join("- " + b for b in bullets) or "(אין עדיין)", transcript=transcript)
         try:
-            out = subprocess.run([CLAUDE, "-p", "--model", "haiku"], input=prompt, capture_output=True, text=True,
+            out = subprocess.run([CLAUDE, "-p", "--model", BULLETS_MODEL], input=prompt, capture_output=True, text=True,
                                  timeout=90, cwd="/tmp").stdout
         except Exception:
             return
@@ -441,7 +448,7 @@ SUMMARY_PROMPT = """לפניך תמלול אוטומטי של שיחה או הר
 - ..."""
 title, summary, tasks, person = "", "", [], ""
 try:
-    out = subprocess.run([CLAUDE, "-p", "--model", "sonnet"], input=SUMMARY_PROMPT.format(owner=OWNER, owner_line=OWNER_LINE, transcript="\n".join(f"{NAMES[sp]}: {t}" for _, sp, t in entries), tabs=TABS or "(אין)", people="\n".join(people) or "(אין)"),
+    out = subprocess.run([CLAUDE, "-p", "--model", SUMMARY_MODEL], input=SUMMARY_PROMPT.format(owner=OWNER, owner_line=OWNER_LINE, transcript="\n".join(f"{NAMES[sp]}: {t}" for _, sp, t in entries), tabs=TABS or "(אין)", people="\n".join(people) or "(אין)"),
                          capture_output=True, text=True, timeout=180, cwd="/tmp").stdout
     sec = None; body = []
     for l in out.splitlines():

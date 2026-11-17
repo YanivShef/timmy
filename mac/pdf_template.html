@@ -1,0 +1,82 @@
+<!doctype html>
+<!--
+  תבנית ה-PDF של טימי ("סקיל ה-PDF"), עיצוב ברירת המחדל.
+  לכל משתמש יש עותק משלו: <תיקיית טימי>/pdf/template.html (+ pdf/brand.json), שמשתנה דרך הצ'אט "עיצוב ה-PDF".
+  הקובץ הזה הוא נקודת ההתחלה ו"חזור לעיצוב המקורי".
+
+  pdf.py ממלא את המקומות המסומנים ב-{{...}}:
+  חובה: {{TITLE}} (כותרת), {{CONTENT}} (תוכן המסמך).
+  שורת "נשלח על ידי טימי" בסוף ה-PDF לא חלק מהתבנית: האפליקציה מוסיפה אותה בקוד.
+  אופציונלי: {{BRAND_HEADER}} (לוגו + שם העסק + תיאור, מ-brand.json), {{LOGO_SRC}}, {{BRAND_NAME}}, {{BRAND_TAGLINE}}, {{BRAND_CONTACT}}.
+  טימי מדפיס את העמוד ל-PDF בגודל A4, ומוסיף לכל עמוד שורת תחתית (פרטי הקשר מ-brand.json + מספר עמוד).
+
+  משתני צבע (ממולאים מ-color ב-brand.json, או מצבע ההדגשה של טימי):
+  --brand       צבע המותג כמו שהוא (פסים, סימנים, רקע כותרת טבלה)
+  --brand-ink   גרסה כהה מספיק לטקסט על לבן (כותרות)
+  --brand-soft  גוון בהיר מאוד לרקעים
+  --on-brand    צבע טקסט שקריא על רקע המותג (שחור או לבן)
+-->
+<html dir="rtl" lang="he">
+<head>
+<meta charset="utf-8">
+<title>{{TITLE}}</title>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --brand: {{BRAND}}; --brand-ink: {{BRAND_INK}}; --brand-soft: {{BRAND_SOFT}}; --on-brand: {{ON_BRAND}}; --ink: #1c1c1e; --muted: #6e6e73; --line: #e8e8ec; }
+  @page { size: A4; margin: 20mm 19mm 24mm 19mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font-family: Heebo, -apple-system, "SF Hebrew", "Arial Hebrew", Arial, sans-serif; color: var(--ink);
+         font-size: 11pt; line-height: 1.7; direction: rtl; text-align: right;
+         -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  /* ראש המסמך: לוגו + שם העסק */
+  .brand-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 26px; }
+  .brand-bar .logo { max-height: 46px; max-width: 150px; object-fit: contain; }
+  .brand-bar .brand-name { font-size: 12.5pt; font-weight: 700; color: var(--ink); line-height: 1.2; }
+  .brand-bar .tagline { font-size: 9pt; color: var(--muted); line-height: 1.3; margin-top: 2px; }
+
+  /* כותרת השיחה */
+  .doc-head { padding-bottom: 16px; margin-bottom: 24px; border-bottom: 1px solid var(--line); position: relative; }
+  .doc-head::after { content: ""; position: absolute; bottom: -1px; right: 0; width: 64px; height: 3px; background: var(--brand); border-radius: 2px; }
+  .kicker { color: var(--brand-ink); font-weight: 700; font-size: 9pt; letter-spacing: .04em; }
+  h1 { font-size: 23pt; font-weight: 800; margin: 2px 0 12px; line-height: 1.22; color: var(--ink); }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 9.5pt; color: var(--muted); }
+  .meta b { color: var(--ink); font-weight: 500; }
+
+  /* תוכן */
+  section { margin: 0 0 18px; }
+  h2 { font-size: 13pt; font-weight: 700; color: var(--brand-ink); margin: 24px 0 8px; line-height: 1.35; break-after: avoid; page-break-after: avoid; }
+  h3 { font-size: 11.5pt; font-weight: 700; margin: 16px 0 6px; break-after: avoid; }
+  p { margin: 0 0 10px; }
+  ul, ol { margin: 0 0 10px; padding-right: 20px; padding-left: 0; }
+  li { margin: 4px 0; }
+  ul li::marker { color: var(--brand); }
+  ol li::marker { color: var(--brand-ink); font-weight: 700; }
+  strong { font-weight: 700; }
+  mark { background: var(--brand-soft); color: inherit; padding: 0 3px; border-radius: 3px; }
+  blockquote { margin: 0 0 12px; padding: 8px 14px; border-right: 3px solid var(--brand); background: #fafafa; color: #333; }
+  body > :last-child, section:last-child, section > :last-child { margin-bottom: 0; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+
+  table { width: 100%; border-collapse: collapse; margin: 6px 0 14px; font-size: 10pt; }
+  th { background: var(--brand-soft); color: var(--ink); text-align: right; padding: 8px 10px; font-weight: 700; border-bottom: 2px solid var(--brand); }
+  td { border-bottom: 1px solid var(--line); padding: 8px 10px; vertical-align: top; }
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  thead { display: table-header-group; }
+  table, ul.tasks { break-inside: avoid; page-break-inside: avoid; }   /* טבלה קצרה לא נחתכת באמצע עמוד */
+  h2 + * { break-before: avoid; }
+
+  /* משימות: תיבה ריקה + אחראי בצד */
+  ul.tasks { list-style: none; padding-right: 0; }
+  ul.tasks li { display: flex; gap: 10px; align-items: flex-start; padding: 7px 0; margin: 0; border-bottom: 1px solid var(--line); break-inside: avoid; }
+  ul.tasks li::before { content: ""; flex: 0 0 12px; height: 12px; border: 1.6px solid var(--brand); border-radius: 3px; margin-top: 6px; }
+  ul.tasks .task { flex: 1; }
+  ul.tasks .owner { flex: 0 0 auto; font-size: 9pt; color: var(--muted); background: #f4f4f6; border-radius: 999px; padding: 1px 10px; margin-top: 3px; white-space: nowrap; }
+</style>
+</head>
+<body>
+{{BRAND_HEADER}}
+{{CONTENT}}
+</body>
+</html>

@@ -126,6 +126,10 @@ else echo "  ! Claude Code לא נמצא. טימי יתמלל, אבל בלי ס�
 # ---------------------------------------------------------------------------
 step "מעתיק את קבצי טימי ושומר הגדרות"
 cp "$HERE/live.py" "$APP_DIR/live.py"
+# "סקיל ה-PDF": העיצוב הבסיסי + שיחה לדוגמה לתצוגה מקדימה. העיצוב האישי של המשתמש (pdf/template.html, pdf/brand.json) לא נדרס
+cp "$HERE/pdf.py" "$APP_DIR/pdf.py"
+cp "$HERE/pdf_template.html" "$APP_DIR/pdf_template.html"
+cp "$HERE/pdf_sample.md" "$APP_DIR/pdf_sample.md"
 mkdir -p "${OUTDIR/#\~/$HOME}"
 NAME="$NAME" ABOUT="$ABOUT" PEOPLE="$PEOPLE" OUTDIR="$OUTDIR" CLAUDE_PATH="$CLAUDE_PATH" FFMPEG="$FFMPEG" \
 CFG="$APP_DIR/config.json" "$APP_DIR/venv/bin/python" - <<'PY'
@@ -210,6 +214,7 @@ fi
 # ---------------------------------------------------------------------------
 step "בדיקה אחרונה"
 "$APP_DIR/venv/bin/python" -c "import ast; ast.parse(open('$APP_DIR/live.py').read())" || fail "קובץ המנוע פגום."
+"$APP_DIR/venv/bin/python" -c "import ast; ast.parse(open('$APP_DIR/pdf.py').read())" || fail "קובץ ה-PDF פגום."
 [[ -x "$APP/Contents/MacOS/CallRecorder" ]] || fail "האפליקציה לא הותקנה."
 ok "הכל מוכן"
 
