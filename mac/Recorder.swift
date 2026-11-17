@@ -855,7 +855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showOnboarding(step: Int?) {
         if let step { onboarding.go(step) }
         if onboardingWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 540),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 600),
                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
@@ -1201,10 +1201,12 @@ struct OnboardingView: View {
                 }
             }
             .transition(.opacity)
-            Spacer(minLength: 18)
+            Spacer(minLength: 12)
+            // התמונה והלינק של היוצר: בכל מסך באונבורדינג
+            instagramLink(o.step >= 6 ? "טיפים ועדכונים באינסטגרם" : "נבנה על ידי")
         }
         .padding(.horizontal, 40).padding(.bottom, 30)
-        .frame(width: 500, height: 540)
+        .frame(width: 500, height: 600)
         .background(Color.black)
         .environment(\.layoutDirection, .rightToLeft)
         .animation(.easeInOut(duration: 0.2), value: o.step)
@@ -1292,7 +1294,6 @@ struct OnboardingView: View {
             Text("הכל קורה על המחשב שלך. בוא נסדר שתי הרשאות וזהו.")
                 .font(.system(size: 12)).foregroundColor(.white.opacity(0.45))
             primary("בוא נתחיל") { o.go(1) }
-            instagramLink("נבנה על ידי")
         }
     }
 
@@ -1451,7 +1452,6 @@ struct OnboardingView: View {
             }
             primary("יאללה") { o.finish(); close() }
             secondary("✨ שפר את טימי") { (NSApp.delegate as? AppDelegate)?.openImprove() }
-            instagramLink("טיפים ועדכונים באינסטגרם")
         }
     }
 }
