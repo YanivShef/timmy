@@ -748,6 +748,7 @@ final class BubbleHost: NSHostingView<BubbleView> {
     override func rightMouseDown(with e: NSEvent) {
         let m = NSMenu()
         m.addItem(withTitle: "פתח תיקיית הקלטות", action: #selector(AppDelegate.openFolder), keyEquivalent: "")
+        m.addItem(withTitle: "שפר את טימי…", action: #selector(AppDelegate.openImprove), keyEquivalent: "")
         m.addItem(withTitle: "הרשאות והגדרה (טימי)", action: #selector(AppDelegate.openOnboarding), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: "יציאה", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
@@ -799,6 +800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showOnboarding(step: nil)
         }
         if args.contains("--demo-hover") { hover.over = true }
+        if args.contains("--demo-improve") { DispatchQueue.main.async { self.openImprove() } }
         if args.contains("--demo-onboarding") {
             let st = args.firstIndex(of: "--demo-onboarding").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 0
             showOnboarding(step: st)
@@ -833,6 +835,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var onboardingWindow: NSWindow?
     let onboarding = Onboarding()
     @objc func openOnboarding() { showOnboarding(step: 1) }
+
+    var improveWindow: NSWindow?
+    let improve = ImproveModel()
+    @objc func openImprove() {
+        improve.reload()
+        if improveWindow == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 600),
+                             styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+            w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
+            w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
+            w.backgroundColor = .black; w.appearance = NSAppearance(named: .darkAqua)
+            w.contentView = NSHostingView(rootView: ImproveView(m: improve))
+            w.center(); improveWindow = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        improveWindow?.makeKeyAndOrderFront(nil)
+    }
     func showOnboarding(step: Int?) {
         if let step { onboarding.go(step) }
         if onboardingWindow == nil {
@@ -877,6 +896,157 @@ func resImage(_ name: String) -> NSImage? {
     if let p = Bundle.main.path(forResource: name, ofType: "png"), let i = NSImage(contentsOfFile: p) { return i }
     if let d = ProcessInfo.processInfo.environment["TIMMY_RES_DIR"] { return NSImage(contentsOfFile: d + "/" + name + ".png") }
     return nil
+}
+
+// MARK: - "שפר את טימי": הוראות אישיות לנקודות ולסיכומים
+final class ImproveModel: ObservableObject {
+    enum Status: Equatable { case idle, working, done(String), failed(String) }
+    @Published var items: [String] = []
+    @Published var draft = ""
+    @Published var status: Status = .idle
+    let examples = ["נקודות קצרות יותר, עד 8 מילים", "תוסיף סעיף \"החלטות\" בטבלה: נושא | מה סוכם | אחראי",
+                    "תוסיף סעיף \"צעדים הבאים ללקוח\"", "תכתוב את הסיכום בגוף ראשון, כאילו אני כתבתי",
+                    "בסוף תכתוב הודעת וואטסאפ קצרה ללקוח עם סיכום השיחה", "בלי אימוג'י ובלי הדגשות"]
+    func reload() { items = (loadConfig()["custom_instructions"] as? [String]) ?? [] }
+    private func save() { saveConfig(["custom_instructions": items]) }
+    func add(_ text: String? = nil) {
+        let t = (text ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !items.contains(t) else { return }
+        items.append(t); save(); if text == nil { draft = "" }
+    }
+    func remove(_ i: Int) { guard items.indices.contains(i) else { return }; items.remove(at: i); save() }
+    // הסיכום האחרון בתיקיית ההקלטות
+    func lastSummary() -> URL? {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: recDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+        return files.filter { $0.pathExtension == "md" && !$0.lastPathComponent.hasSuffix(" נקודות.md") }
+            .max { (a, b) in
+                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return da < db }
+    }
+    // מחיל את ההוראות על הסיכום האחרון (live.py --restyle)
+    func improveLast() {
+        if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { add() }
+        guard !items.isEmpty else { status = .failed("קודם תכתוב מה לשפר"); return }
+        guard let md = lastSummary() else { status = .failed("עוד אין שיחות שמורות"); return }
+        status = .working
+        let p = Process(); p.executableURL = URL(fileURLWithPath: python)
+        p.arguments = [worker, "--restyle", md.path]
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle(forWritingAtPath: "/dev/null")
+        p.terminationHandler = { _ in
+            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                if text.contains("\"changed\": true") {
+                    self.status = .done(md.deletingPathExtension().lastPathComponent)
+                    NSWorkspace.shared.activateFileViewerSelecting([md])
+                } else { self.status = .failed("לא הצלחתי לשפר, בדוק שה-Claude מחובר") }
+            }
+        }
+        do { try p.run() } catch { status = .failed("שגיאה בהפעלה") }
+    }
+}
+
+struct ImproveView: View {
+    @ObservedObject var m: ImproveModel
+    let amber = Color(red: 1.0, green: 0.627, blue: 0.275)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                if let img = resImage("timmy") { Image(nsImage: img).resizable().frame(width: 44, height: 44) }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("שפר את טימי").font(.system(size: 22, weight: .bold)).foregroundColor(.white)
+                    Text("תגיד לי מה לשנות בנקודות ובסיכומים. אזכור את זה לכל השיחות הבאות.")
+                        .font(.system(size: 13)).foregroundColor(.white.opacity(0.6))
+                }
+            }
+            .padding(.top, 26)
+
+            // שדה כתיבה
+            HStack(spacing: 8) {
+                TextField("למשל: תוסיף סעיף של שאלות פתוחות", text: $m.draft)
+                    .textFieldStyle(.plain).font(.system(size: 14)).foregroundColor(.white)
+                    .padding(.vertical, 10).padding(.horizontal, 12)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+                    .onSubmit { m.add() }
+                Button(action: { m.add() }) {
+                    Text("הוסף").font(.system(size: 13, weight: .semibold)).foregroundColor(.black)
+                        .padding(.vertical, 9).padding(.horizontal, 16).background(Capsule().fill(amber))
+                }.buttonStyle(.plain)
+            }
+
+            // דוגמאות
+            Text("רעיונות").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
+            FlowChips(items: m.examples.filter { !m.items.contains($0) }) { m.add($0) }
+
+            // ההוראות השמורות
+            Text("ההוראות שלך (\(m.items.count))").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
+            ScrollView {
+                VStack(spacing: 6) {
+                    if m.items.isEmpty {
+                        Text("עוד אין הוראות. טימי כותב בסגנון ברירת המחדל.").font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.4)).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                    }
+                    ForEach(Array(m.items.enumerated()), id: \.offset) { i, t in
+                        HStack(spacing: 8) {
+                            Circle().fill(amber).frame(width: 5, height: 5)
+                            Text(t).font(.system(size: 13)).foregroundColor(.white.opacity(0.9))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Button(action: { m.remove(i) }) {
+                                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.5))
+                                    .padding(6).background(Circle().fill(Color.white.opacity(0.08)))
+                            }.buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 8).padding(.horizontal, 12)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity)
+
+            // שיפור הסיכום האחרון
+            VStack(spacing: 8) {
+                Button(action: { m.improveLast() }) {
+                    HStack(spacing: 8) {
+                        if m.status == .working { ProgressView().controlSize(.small) }
+                        Text(m.status == .working ? "משפר את הסיכום האחרון…" : "✨ שפר גם את הסיכום של השיחה האחרונה")
+                            .font(.system(size: 14, weight: .semibold)).foregroundColor(.black)
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 11).background(Capsule().fill(amber))
+                }
+                .buttonStyle(.plain).disabled(m.status == .working)
+                switch m.status {
+                case .done(let name): Text("✓ שופר: \(name)").font(.system(size: 12)).foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35)).lineLimit(1)
+                case .failed(let why): Text(why).font(.system(size: 12)).foregroundColor(Color(red: 1, green: 0.4, blue: 0.4))
+                default: Text("הנקודות החיות והסיכומים של השיחות הבאות כבר ייכתבו לפי ההוראות.").font(.system(size: 11)).foregroundColor(.white.opacity(0.4))
+                }
+            }
+        }
+        .padding(.horizontal, 28).padding(.bottom, 24)
+        .frame(width: 520, height: 600)
+        .background(Color.black)
+        .environment(\.layoutDirection, .rightToLeft)
+    }
+}
+
+// שבבי דוגמאות שנשברים לשורות
+struct FlowChips: View {
+    let items: [String]; let tap: (String) -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(stride(from: 0, to: items.count, by: 2)), id: \.self) { i in
+                HStack(spacing: 6) {
+                    ForEach(items[i..<min(i + 2, items.count)], id: \.self) { t in
+                        Button(action: { tap(t) }) {
+                            Text("+ " + t).font(.system(size: 12)).foregroundColor(.white.opacity(0.8)).lineLimit(1)
+                                .padding(.vertical, 6).padding(.horizontal, 10)
+                                .background(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - טימי: אונבורדינג הרשאות
@@ -1177,7 +1347,13 @@ struct OnboardingView: View {
 
     var claudeStep: some View {
         VStack(spacing: 18) {
-            Image(systemName: "sparkles").font(.system(size: 40)).foregroundColor(amber)
+            Group {
+                if let logo = resImage("claude") {
+                    Image(nsImage: logo).resizable().interpolation(.high).frame(width: 46, height: 46)
+                } else {
+                    Image(systemName: "sparkles").font(.system(size: 40)).foregroundColor(amber)
+                }
+            }
             header("החיבור ל-Claude", "את הנקודות, הסיכום והמשימות כותב Claude,\nדרך Claude Code שמותקן אצלך ועם המנוי שלך. בלי מפתחות ובלי הגדרות.\nרק הטקסט של השיחה נשלח, לא ההקלטה.")
             switch o.claude {
             case .unknown, .checking:
@@ -1193,10 +1369,21 @@ struct OnboardingView: View {
             case .notInstalled:
                 status(false, "", "Claude Code לא נמצא במחשב", critical: true)
                 Text("בלי Claude אקליט ואתמלל, אבל בלי נקודות וסיכום.").font(.system(size: 12)).foregroundColor(.white.opacity(0.5))
-                HStack(spacing: 10) {
-                    primary("איך מתקינים") { NSWorkspace.shared.open(URL(string: "https://claude.com/claude-code")!) }
-                    secondary("בדוק שוב") { o.checkClaude() }
+                // כפתור הורדה עם הלוגו של Claude
+                Button(action: { NSWorkspace.shared.open(URL(string: "https://claude.com/claude-code")!) }) {
+                    HStack(spacing: 10) {
+                        if let logo = resImage("claude") {
+                            Image(nsImage: logo).resizable().interpolation(.high).frame(width: 22, height: 22)
+                        }
+                        Text("הורד את Claude Code").font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
+                    }
+                    .frame(maxWidth: 280).padding(.vertical, 11)
+                    .background(Capsule().fill(Color(red: 0.85, green: 0.47, blue: 0.34).opacity(0.22)))
+                    .overlay(Capsule().stroke(Color(red: 0.85, green: 0.47, blue: 0.34).opacity(0.8), lineWidth: 1.2))
                 }
+                .buttonStyle(.plain)
+                .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+                secondary("התקנתי, בדוק שוב") { o.checkClaude() }
                 secondary("המשך בלי סיכומים") { o.go(5) }
             case .notLoggedIn:
                 status(false, "", "Claude Code מותקן, אבל לא מחובר לחשבון", critical: true)
@@ -1209,7 +1396,12 @@ struct OnboardingView: View {
                 secondary("המשך בלי סיכומים") { o.go(5) }
             }
         }
-        .onAppear { if o.claude == .unknown || o.claude == .notInstalled { o.checkClaude() } }
+        .onAppear {
+            if let st = ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE"] {
+                o.claude = st == "missing" ? .notInstalled : .notLoggedIn; return
+            }
+            if o.claude == .unknown || o.claude == .notInstalled { o.checkClaude() }
+        }
     }
 
     var shortFolder: String { FileManager.default.displayName(atPath: o.folder) }
@@ -1258,6 +1450,7 @@ struct OnboardingView: View {
                 .toggleStyle(.switch).tint(amber)
             }
             primary("יאללה") { o.finish(); close() }
+            secondary("✨ שפר את טימי") { (NSApp.delegate as? AppDelegate)?.openImprove() }
             instagramLink("טיפים ועדכונים באינסטגרם")
         }
     }

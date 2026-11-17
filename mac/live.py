@@ -6,7 +6,7 @@ import numpy as np
 SR = 16000
 base = sys.argv[1]
 # ---- הגדרות: ~/Library/Application Support/Timmy/config.json ----
-APP_DIR = os.path.expanduser("~/Library/Application Support/Timmy")
+APP_DIR = os.environ.get("TIMMY_APP_DIR") or os.path.expanduser("~/Library/Application Support/Timmy")
 def load_config():
     try:
         with open(os.path.join(APP_DIR, "config.json"), encoding="utf-8") as f: return json.load(f)
@@ -18,6 +18,62 @@ OWNER = (CFG.get("owner_name") or "אני").strip()
 OWNER_DESC = (CFG.get("owner_description") or "").strip()
 OWNER_LINE = f"{OWNER} ({OWNER_DESC})" if OWNER_DESC else OWNER
 NAMES = {0: "צד שני", 1: OWNER}
+
+# ---- "שפר את טימי": הוראות אישיות של המשתמש לנקודות ולסיכום (config: custom_instructions) ----
+CUSTOM = [x.strip() for x in (CFG.get("custom_instructions") or []) if isinstance(x, str) and x.strip()]
+def custom_block(kind):
+    if not CUSTOM: return ""
+    return (f"\n\nהעדפות אישיות של {OWNER} ל{kind} (חובה לכבד; במקרה של סתירה הן גוברות על ההנחיות למעלה):\n"
+            + "\n".join("- " + c for c in CUSTOM))
+def _claude_path():
+    import shutil, glob
+    cands = [CFG.get("claude_path") or "", shutil.which("claude") or "",
+             os.path.expanduser("~/.claude/local/claude"), os.path.expanduser("~/.local/bin/claude"),
+             "/opt/homebrew/bin/claude", "/usr/local/bin/claude"] + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/claude")), reverse=True)
+    return next((c for c in cands if c and os.path.exists(c)), "")
+RESTYLE_PROMPT = """לפניך מסמך סיכום של שיחה (Markdown) ואת התמלול המלא של השיחה.
+{owner} ביקש שהסיכומים שלו ייכתבו לפי ההוראות האלה:
+{custom}
+
+כתוב מחדש את מסמך הסיכום כך שיעמוד בהוראות. מותר לשנות מבנה, סדר, סעיפים, אורך, ניסוח ועיצוב (טבלאות, הדגשות, אימוג'י וכו') לפי ההוראות, ולהוסיף מידע מהתמלול אם ההוראות מבקשות.
+כללים קבועים:
+1. השורה הראשונה נשארת כותרת שמתחילה ב-"# ".
+2. שורת התאריך, האורך ו"עם" נשארת בדיוק כמו שהיא.
+3. השורה שמתחילה ב-"תמלול מלא:" נשארת בסוף בדיוק כמו שהיא.
+4. אל תמציא שום עובדה שלא מופיעה בתמלול. בלי מקף ארוך.
+החזר רק את המסמך המלא, בלי שום טקסט לפניו או אחריו.
+
+המסמך הנוכחי:
+{md}
+
+התמלול:
+{transcript}"""
+def restyle(md_text, transcript_text):
+    """מחיל את ההוראות האישיות על מסמך סיכום. אם משהו נכשל, מחזיר את המקור."""
+    claude = _claude_path()
+    if not CUSTOM or not claude: return md_text
+    try:
+        out = subprocess.run([claude, "-p", "--model", "sonnet"], capture_output=True, text=True, timeout=240, cwd="/tmp",
+                             input=RESTYLE_PROMPT.format(owner=OWNER, custom="\n".join("- " + c for c in CUSTOM),
+                                                         md=md_text, transcript=transcript_text[-60000:])).stdout.strip()
+    except Exception:
+        return md_text
+    if out.startswith("```"): out = out.strip("`").split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    return out + "\n" if out.startswith("# ") and "תמלול מלא:" in out else md_text
+
+# מצב "שפר סיכום קיים": live.py --restyle <קובץ סיכום.md>
+if base == "--restyle":
+    md_path = sys.argv[2]
+    tr_path = md_path[:-3] + " - תמלול.txt"
+    md_text = open(md_path, encoding="utf-8").read()
+    tr_text = open(tr_path, encoding="utf-8").read() if os.path.exists(tr_path) else ""
+    new_text = restyle(md_text, tr_text)
+    if new_text != md_text:
+        open(md_path, "w", encoding="utf-8").write(new_text)
+        print(json.dumps({"type": "restyled", "txt": md_path, "changed": True}, ensure_ascii=False), flush=True)
+    else:
+        print(json.dumps({"type": "restyled", "txt": md_path, "changed": False}, ensure_ascii=False), flush=True)
+    sys.exit(0)
 disk_full = [False]
 lock = threading.Lock(); chunks = {0: [], 1: []}; eof = [False]; total = {0: 0, 1: 0}; got = {0: False, 1: False}
 
@@ -154,14 +210,14 @@ PROMPT = """אתה רושם נקודות עיקריות משיחה בעברית 
 תמלול השיחה עד עכשיו:
 {transcript}
 
-החזר רשימה מעודכנת של עד 10 נקודות עיקריות: רק דברים מהותיים (מידע, רעיונות, החלטות, משימות, מספרים, הסכמות), לא סיכום של כל משפט ולא חילופי נימוסים. קצרות (עד 14 מילים), בעברית, בסדר כרונולוגי. אל תעיר על איכות התמלול. אם עדיין אין שום דבר מהותי, החזר נקודה אחת שמתארת על מה השיחה. שמור על נקודות קיימות שעדיין נכונות, אחד כפילויות והוסף את מה שחדש. בלי מקף ארוך. החזר רק שורות שמתחילות ב-"- " ושום טקסט אחר."""
+החזר רשימה מעודכנת של עד 10 נקודות עיקריות: רק דברים מהותיים (מידע, רעיונות, החלטות, משימות, מספרים, הסכמות), לא סיכום של כל משפט ולא חילופי נימוסים. קצרות (עד 14 מילים), בעברית, בסדר כרונולוגי. אל תעיר על איכות התמלול. אם עדיין אין שום דבר מהותי, החזר נקודה אחת שמתארת על מה השיחה. שמור על נקודות קיימות שעדיין נכונות, אחד כפילויות והוסף את מה שחדש. בלי מקף ארוך. החזר רק שורות שמתחילות ב-"- " ושום טקסט אחר.{custom}"""
 
 def update_bullets():
     with blk:
         n = len(finals)
         if n == bullets_state["done_upto"]: return
         transcript = "\n".join(finals)[-9000:]
-        prompt = PROMPT.format(owner=OWNER, owner_line=OWNER_LINE, bullets="\n".join("- " + b for b in bullets) or "(אין עדיין)", transcript=transcript)
+        prompt = PROMPT.format(owner=OWNER, owner_line=OWNER_LINE, custom=custom_block("נקודות"), bullets="\n".join("- " + b for b in bullets) or "(אין עדיין)", transcript=transcript)
         try:
             out = subprocess.run([CLAUDE, "-p", "--model", "haiku"], input=prompt, capture_output=True, text=True,
                                  timeout=90, cwd="/tmp").stdout
@@ -399,8 +455,12 @@ if summary: md += ["## סיכום", "", summary, ""]
 if bullets: md += ["## נקודות עיקריות", ""] + ["- " + b for b in bullets] + [""]
 if tasks: md += ["## משימות", ""] + ["- [ ] " + t for t in tasks] + [""]
 md += [f"תמלול מלא: {os.path.basename(new)} - תמלול.txt", ""]
-with open(new + ".md", "w") as f: f.write("\n".join(md))
+md_text = "\n".join(md)
+if CUSTOM:   # "שפר את טימי": הסיכום נכתב מחדש לפי ההוראות האישיות
+    emit({"type": "saving"})
+    md_text = restyle(md_text, "\n".join(f"{NAMES[sp]}: {t}" for _, sp, t in entries))
+with open(new + ".md", "w") as f: f.write(md_text)
 # שיחה עם אדם מזוהה: עותק לתיקיית הפגישות (אם הוגדרה)
 if person and MEETINGS_DIR and os.path.isdir(MEETINGS_DIR) and not os.environ.get("LIVE_NO_VAULT"):
-    with open(os.path.join(MEETINGS_DIR, os.path.basename(new) + ".md"), "w") as f: f.write("\n".join(md))
+    with open(os.path.join(MEETINGS_DIR, os.path.basename(new) + ".md"), "w") as f: f.write(md_text)
 emit({"type": "done", "txt": new + ".md", "title": title})
