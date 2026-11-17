@@ -10,6 +10,9 @@ import ServiceManagement
 import WebKit
 import PDFKit
 import UniformTypeIdentifiers
+import Network
+import Security
+import CryptoKit
 
 enum Phase: Equatable { case idle, recording, finishing, message(String) }
 
@@ -873,6 +876,7 @@ final class BubbleHost: NSHostingView<BubbleView> {
         m.addItem(withTitle: "השיחות שלי…", action: #selector(AppDelegate.openCalls), keyEquivalent: "")
         m.addItem(withTitle: "פתח תיקיית הקלטות", action: #selector(AppDelegate.openFolder), keyEquivalent: "")
         m.addItem(withTitle: "שפר את טימי…", action: #selector(AppDelegate.openImprove), keyEquivalent: "")
+        m.addItem(withTitle: "עצב את טימי…", action: #selector(AppDelegate.openDesign), keyEquivalent: "")
         m.addItem(withTitle: "הרשאות והגדרה (טימי)", action: #selector(AppDelegate.openOnboarding), keyEquivalent: "")
         m.addItem(.separator())
         m.addItem(withTitle: "יציאה", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
@@ -922,7 +926,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // שינוי צבע: מרעננים את כל המסכים
         NotificationCenter.default.addObserver(forName: Notification.Name("timmy.themeChanged"), object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
-            self.recorder.objectWillChange.send(); self.onboarding.objectWillChange.send(); self.improve.objectWillChange.send()
+            self.recorder.objectWillChange.send(); self.onboarding.objectWillChange.send(); self.improve.objectWillChange.send(); self.designChat.objectWillChange.send()
             self.calls.objectWillChange.send(); self.pdfDesign.objectWillChange.send()
             hover.objectWillChange.send()
         }
@@ -933,7 +937,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             showOnboarding(step: nil)
         }
         if args.contains("--demo-hover") { hover.over = true }
-        if args.contains("--demo-improve") { DispatchQueue.main.async { self.openImprove() } }
+        // --demo-improve / --demo-design-timmy [--demo-chat-send "הודעה"]...
+        if args.contains("--demo-improve") || args.contains("--demo-design-timmy") {
+            DispatchQueue.main.async {
+                let design = args.contains("--demo-design-timmy")
+                if design { self.openDesign() } else { self.openImprove() }
+                let m = design ? self.designChat : self.improve
+                for (i, a) in args.enumerated() where a == "--demo-chat-send" && i + 1 < args.count { m.send(args[i + 1]) }
+            }
+        }
         if args.contains("--demo-calls") { DispatchQueue.main.async { self.runCallsDemo() } }
         if args.contains("--demo-design") { DispatchQueue.main.async { self.runDesignDemo() } }
         if args.contains("--demo-onboarding") {
@@ -971,21 +983,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let onboarding = Onboarding()
     @objc func openOnboarding() { showOnboarding(step: 1) }
 
-    var improveWindow: NSWindow?
-    let improve = ImproveModel()
-    @objc func openImprove() {
-        improve.reload()
-        if improveWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 820),
-                             styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+    // "שפר את טימי" / "עצב את טימי": צ'אט עם טימי
+    var improveWindow: NSWindow?, designWindow: NSWindow?
+    let improve = TimmyChatModel(design: false), designChat = TimmyChatModel(design: true)
+    @objc func openImprove() { improveWindow = showChat(improveWindow, improve) }
+    @objc func openDesign() { designWindow = showChat(designWindow, designChat) }
+    func showChat(_ existing: NSWindow?, _ m: TimmyChatModel) -> NSWindow {
+        m.load()
+        let w = existing ?? {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 820),
+                             styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
             w.backgroundColor = NSColor(bgColor); w.appearance = NSAppearance(named: .darkAqua)
-            w.contentView = NSHostingView(rootView: ImproveView(m: improve))
-            w.center(); improveWindow = w
-        }
+            let host = NSHostingView(rootView: TimmyChatView(m: m))
+            host.sizingOptions = [.minSize]
+            w.contentView = host
+            w.center()
+            return w
+        }()
         NSApp.activate(ignoringOtherApps: true)
-        improveWindow?.makeKeyAndOrderFront(nil)
+        w.makeKeyAndOrderFront(nil)
+        return w
     }
     // "השיחות שלי"
     var callsWindow: NSWindow?
@@ -1028,16 +1047,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pdfDesign.load()
         if let text, !text.isEmpty { pdfDesign.send(text) }
     }
-    // דמו לבדיקות: --demo-calls [--demo-select N] [--demo-query X] [--demo-send kind] [--demo-autosend] [--demo-connect] [--demo-empty-wa]
+    // דמו לבדיקות: --demo-calls [--demo-select N] [--demo-query X] [--demo-send kind] [--demo-autosend] [--demo-connect] [--demo-gl-connect] [--demo-gl-disconnect]
     func runCallsDemo() {
         openCalls()
         if let i = args.firstIndex(of: "--demo-select"), i + 1 < args.count, let n = Int(args[i + 1]), calls.calls.indices.contains(n) { calls.selectedID = calls.calls[n].id }
         if let i = args.firstIndex(of: "--demo-query"), i + 1 < args.count { calls.query = args[i + 1] }
         if args.contains("--demo-connect") { calls.overlay = .connect }
-        if args.contains("--demo-connect-run") {   // בדיקה: מריץ את החיבור (עם claude מזויף) ובודק שוב
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { self.calls.connectToClaude() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4.5) { self.calls.checkWhatsApp() }
-        }
+        // בדיקה: חיבור Greenolink בלחיצה אחת (מול שרת מדומה, TIMMY_GREENOLINK_BASE) / ניתוק
+        if args.contains("--demo-gl-connect") { calls.overlay = .connect; DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.calls.connectGreenolink() } }
+        if args.contains("--demo-gl-disconnect") { calls.overlay = .connect; DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.calls.disconnectGreenolink() } }
         if let i = args.firstIndex(of: "--demo-send"), i + 1 < args.count, let c = calls.selected {
             calls.openSend(c)
             let s = calls.session!
@@ -1045,7 +1063,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if s.kind == .free { s.request = "תשלח לה תזכורת למשימות ביום חמישי" }
             if args.contains("--demo-choose") { return }
             func go() {
-                if case .connected = calls.wa { s.makeDraft() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { go() } }
+                if calls.wa.canSend { s.makeDraft() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { go() } }
             }
             go()
             if args.contains("--demo-autosend") {
@@ -1119,231 +1137,355 @@ func resImage(_ name: String) -> NSImage? {
     return nil
 }
 
-// MARK: - "שפר את טימי": הוראות אישיות לנקודות ולסיכומים
-final class ImproveModel: ObservableObject {
-    enum Status: Equatable { case idle, working, done(String), failed(String) }
+// MARK: - "שפר את טימי" / "עצב את טימי": צ'אט עם טימי. כותבים לו, הוא עונה ומשתנה
+// design = רק מראה (צבע, עיניים, רקע, אנימציות). אחרת גם הוראות לנקודות ולסיכומים, PDF, והחלה על השיחה האחרונה
+let chatBusy = "טימי כותב…"
+func isHex(_ v: String) -> Bool { v.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil }
+// שינויי מראה שהגיעו מ-Claude: רק מפתחות מוכרים וערכים תקינים
+func validLooks(_ c: [String: Any]) -> [String: Any] {
+    var out: [String: Any] = [:]
+    for k in ["accent_color", "background_color"] { if let v = c[k] as? String, isHex(v) { out[k] = v.uppercased() } }
+    if let v = c["eye_color"] as? String, v.isEmpty || isHex(v) { out["eye_color"] = v.uppercased() }
+    if let v = c["animations"] as? Bool { out["animations"] = v }
+    if c["reset"] as? Bool == true { out["reset"] = true }
+    return out
+}
+// "לכחול" / "לשחור" / "ל-#1E3A8A"
+func colorWord(_ hex: String) -> String {
+    let h = hex.uppercased()
+    if h == defaultAccent { return "לכתום" }
+    if h == "#000000" { return "לשחור" }
+    if let n = colorNames.first(where: { $0.1 == h && $0.0.range(of: "^[a-z]+$", options: .regularExpression) == nil }) { return "ל" + n.0 }
+    return "ל-" + h
+}
+// מחיל שינויי מראה ומחזיר משפט של טימי על מה שהשתנה
+@discardableResult func applyLooks(_ c: [String: Any]) -> String {
+    let wantedBg = c["background_color"] as? String
+    Theme.apply(c)
+    var parts: [String] = []
+    if c["reset"] as? Bool == true { parts.append("חזרתי למראה המקורי") }
+    if let v = c["accent_color"] as? String { parts.append("החלפתי את צבע ההדגשה " + colorWord(v)) }
+    if let v = c["eye_color"] as? String { parts.append(v.isEmpty ? "העיניים חזרו לצבע ההדגשה" : "צבעתי את העיניים " + colorWord(v)) }
+    if let w = wantedBg {
+        parts.append("שיניתי את הרקע " + colorWord(w) + (Theme.bgHex.uppercased() == w.uppercased() ? "" : " (הכהיתי אותו קצת כדי שהטקסט יישאר קריא)"))
+    }
+    if let a = c["animations"] as? Bool { parts.append(a ? "הדלקתי את האנימציות" : "כיביתי את האנימציות") }
+    return parts.isEmpty ? "לא שיניתי כלום." : parts.joined(separator: ", ") + ". זה כבר מאחורי החלון."
+}
+// בקשת מראה פשוטה (יעד אחד, צבע אחד, בלי בקשות נוספות): מוחלת מיד בלי Claude. כל השאר הולך ל-Claude
+func isSimpleLooks(_ t: String) -> Bool {
+    let l = t.lowercased()
+    let targets = [["רקע", "background"], ["עיניים", "eyes"], ["אנימציה", "אנימציות", "animation", "animations"]]
+        .filter { g in g.contains { hasWord(l, $0) } }.count
+    let colors = Set(colorNames.filter { c in [c.0, c.0 + "ה", c.0 + "ות", c.0 + "ים"].contains { hasWord(l, $0) } }.map { $0.1 }).count
+        + (hasWord(l, "כתום") ? 1 : 0) + (hasWord(l, "שחור") ? 1 : 0)
+    let other = ["נקודות", "סיכום", "סעיף", "משימות", "pdf", "לוגו", "הוראה", "שיחה"].contains { l.contains($0) }
+    return targets <= 1 && colors <= 1 && !other && !l.contains(" וגם ")
+}
+func asksLastCall(_ t: String) -> Bool { ["אחרונ", "האחרון", "הקודמת", "last"].contains { t.lowercased().contains($0) } }
+
+final class TimmyChatModel: ObservableObject {
+    let design: Bool
+    @Published var msgs: [ChatMsg] = []
+    @Published var input = ""
+    @Published var busy: String?
     @Published var items: [String] = []
-    @Published var draft = ""
-    @Published var status: Status = .idle
-    let examples = ["תחליף את הצבע לכחול", "עיניים ירוקות", "רקע כחול כהה", "נקודות קצרות יותר, עד 8 מילים", "תוסיף סעיף \"החלטות\" בטבלה: נושא | מה סוכם | אחראי", "תוסיף את הלוגו שלי ל-PDF", "תוריד אנימציות",
-                    "תוסיף סעיף \"צעדים הבאים ללקוח\"", "תכתוב את הסיכום בגוף ראשון, כאילו אני כתבתי",
-                    "בסוף תכתוב הודעת וואטסאפ קצרה ללקוח עם סיכום השיחה", "בלי אימוג'י ובלי הדגשות"]
-    func reload() { items = (loadConfig()["custom_instructions"] as? [String]) ?? [] }
-    private func save() { saveConfig(["custom_instructions": items]) }
-    @Published var accent = Theme.accentHex
-    func add(_ text: String? = nil) {
-        let t = (text ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
+    @Published var showMemory = false
+    private var queue: [String] = []
+    private var loaded = false
+    init(design: Bool) { self.design = design }
+    var chatFile: URL { appDir.appendingPathComponent(design ? "chat-design.json" : "chat-improve.json") }
+    var intro: String {
+        design ? "היי, אני טימי. תגיד לי איך אני נראה: צבע ההדגשה, העיניים, הרקע או האנימציות. אני משתנה מיד, ותראה את זה מאחורי החלון."
+               : "היי, אני טימי. תגיד לי מה לשנות: איך אני מסכם שיחות, מה אני רושם בנקודות בזמן השיחה, איך ה-PDF נראה, או איך אני נראה. אני זוכר את זה לכל השיחות הבאות."
+    }
+    var suggestions: [String] {
+        design ? ["עיניים ירוקות", "רקע כחול כהה", "תחליף את הצבע לסגול", "תוריד אנימציות"]
+               : ["נקודות קצרות יותר, עד 8 מילים", "תוסיף לסיכום סעיף \"צעדים הבאים ללקוח\"", "תכתוב את הסיכום בגוף ראשון", "עיניים ירוקות"]
+    }
+    func load() {
+        items = (loadConfig()["custom_instructions"] as? [String]) ?? []
+        guard !loaded else { return }
+        loaded = true
+        if let d = try? Data(contentsOf: chatFile), let m = try? JSONDecoder().decode([ChatMsg].self, from: d) { msgs = m }
+        if msgs.isEmpty { msgs = [ChatMsg(fromUser: false, text: intro)] }
+    }
+    private func save() {
+        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        if let d = try? JSONEncoder().encode(Array(msgs.suffix(60))) { try? d.write(to: chatFile) }
+    }
+    private func say(_ t: String, error: Bool = false) { msgs.append(ChatMsg(fromUser: false, text: t, isError: error)); save() }
+    private func saveItems() { saveConfig(["custom_instructions": items]) }
+    func removeItem(_ t: String) { items.removeAll { $0 == t }; saveItems() }
+    func resetLooks() { say(applyLooks(["reset": true])) }
+
+    func send(_ text: String? = nil) {
+        let t = (text ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        // הוראה על ה-PDF (עיצוב, לוגו, שם העסק במסמך...): עוברת לצ'אט "עיצוב ה-PDF"
-        if isPDFInstruction(t) {
-            if text == nil { draft = "" }
-            (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: t)
-            status = .done("העברתי לעיצוב ה-PDF")
+        if text == nil { input = "" }
+        if busy != nil { queue.append(t); return }
+        msgs.append(ChatMsg(fromUser: true, text: t)); save()
+        // מסלול מהיר: הוראת מראה ברורה, בלי Claude
+        if design || isAppearanceInstruction(t), isSimpleLooks(t), let c = parseAppearance(t) {
+            let reply = applyLooks(c)
+            busy = chatBusy
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { self.busy = nil; self.say(reply); self.next() }
             return
         }
-        // הוראת מראה (צבע, רקע, עיניים, אנימציה): משנה את האפליקציה מיד, לא נשמרת כהוראה לסיכום
-        if isAppearanceInstruction(t) {
-            if text == nil { draft = "" }
-            if let c = parseAppearance(t) { applyAppearance(c) } else { askClaudeForAppearance(t) }
-            return
-        }
-        guard !items.contains(t) else { return }
-        items.append(t); save(); if text == nil { draft = "" }
+        askClaude(t)
     }
-    func applyAppearance(_ c: [String: Any]) {
-        let wantedBg = c["background_color"] as? String
-        Theme.apply(c); accent = Theme.accentHex
-        if c["reset"] != nil { status = .done("המראה חזר לברירת המחדל"); return }
-        var parts: [String] = []
-        if c["accent_color"] != nil { parts.append("צבע") }
-        if c["eye_color"] != nil { parts.append("עיניים") }
-        if let w = wantedBg { parts.append(Theme.bgHex.uppercased() == w.uppercased() ? "רקע" : "רקע (הוכהה כדי שהטקסט יהיה קריא)") }
-        if let a = c["animations"] as? Bool { parts.append(a ? "אנימציות פעילות" : "אנימציות כבויות") }
-        status = .done("עודכן: " + parts.joined(separator: ", "))
+    private func next() { if busy == nil, !queue.isEmpty { send(queue.removeFirst()) } }
+
+    func prompt(_ t: String) -> String {
+        let owner = ((loadConfig()["owner_name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+        let state = "צבע הדגשה \(Theme.accentHex), עיניים \(Theme.eyeHex.isEmpty ? "כמו צבע ההדגשה" : Theme.eyeHex), רקע \(Theme.bgHex), אנימציות \(Theme.animations ? "פועלות" : "כבויות")"
+        let mem = items.isEmpty ? "אין" : items.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+        let history = msgs.dropLast().suffix(6).map { ($0.fromUser ? "משתמש: " : "טימי: ") + $0.text }.joined(separator: "\n")
+        let scope = design
+            ? "אתה במצב \"עצב את טימי\": מותר רק appearance. אם מבקשים משהו אחר (סיכומים, נקודות, PDF) אל תחזיר actions, ותגיד בעדינות שזה נמצא ב\"שפר את טימי\"."
+            : """
+            - {"type":"add_instruction","text":"..."} הוראה קבועה לנקודות שבזמן השיחה או לסיכום השיחה. ניסוח קצר וברור, כמו הוראה למסכם.
+            - {"type":"remove_instruction","text":"<הטקסט המדויק מהרשימה>"}
+            - {"type":"pdf_instruction","text":"..."} כל מה שקשור לקובץ ה-PDF ללקוח (לוגו, עיצוב המסמך, שם העסק, פרטי קשר בתחתית).
+            - {"type":"apply_to_last_call"} רק אם המשתמש ביקש במפורש להחיל על השיחה האחרונה.
+            """
+        return """
+        אתה טימי, אפליקציית מק שמקליטה שיחות, רושמת נקודות בזמן אמת וכותבת סיכום. \(owner.isEmpty ? "המשתמש" : owner) כותב לך בצ'אט מה לשנות בך.
+        החזר JSON בלבד בשורה אחת: {"reply": "...", "actions": [...]}
+        reply: עברית, גוף ראשון בתור טימי, משפט או שניים, חם וטבעי. אומר בדיוק מה שינית, או שואל שאלת הבהרה אם לא ברור מה לעשות. בלי מקף ארוך.
+        actions: רק מה שהמשתמש ביקש במפורש. אם לא ברור, רשימה ריקה ושאלה ב-reply.
+        - {"type":"appearance","changes":{...}} מפתחות: accent_color (#RRGGBB, כפתורים והדגשות), eye_color (#RRGGBB, העיניים והפה; "" = כמו צבע ההדגשה), background_color (#RRGGBB כהה, הטקסט לבן), animations (true/false), reset (true = המראה המקורי)
+        \(scope)
+        המראה עכשיו: \(state)
+        ההוראות שאני זוכר:
+        \(mem)
+        השיחה עד עכשיו:
+        \(history)
+        ההודעה החדשה של המשתמש: "\(t)"
+        """
     }
-    func remove(_ i: Int) { guard items.indices.contains(i) else { return }; items.remove(at: i); save() }
-    func applyColor(_ hex: String?) { applyAppearance(hex == nil ? ["reset": true] : ["accent_color": hex!]) }
-    func askClaudeForAppearance(_ t: String) {
-        guard let claude = Onboarding.shared?.claudePath() else {
-            if !items.contains(t) { items.append(t); save() }
-            status = .done("נשמר כהוראה לנקודות ולסיכומים"); return
-        }
-        status = .working
-        let prompt = "המשתמש כתב הוראה לשינוי המראה של אפליקציה כהה (רקע שחור, טקסט לבן, צבע הדגשה כתום): \"" + t + "\". החזר JSON בלבד, עם רק המפתחות שהמשתמש ביקש לשנות מתוך: accent_color (#RRGGBB, כפתורים והדגשות), eye_color (#RRGGBB, העיניים והפה של הדמות), background_color (#RRGGBB, כהה מספיק לטקסט לבן), animations (true/false), reset (true, לחזרה לברירת המחדל). בלי שום טקסט נוסף."
+
+    private func askClaude(_ t: String) {
+        busy = chatBusy
+        let p = prompt(t)
         DispatchQueue.global().async {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: claude)
-            p.arguments = ["-p", "--model", "haiku", prompt]
-            p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            let out = Pipe(); p.standardOutput = out; p.standardError = Pipe(); p.standardInput = FileHandle.nullDevice
-            var changes: [String: Any]?
-            if (try? p.run()) != nil {
-                let deadline = Date().addingTimeInterval(45)
-                while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
-                if p.isRunning { p.terminate() }
-                let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                if let a = text.firstIndex(of: "{"), let b = text.lastIndex(of: "}"),
-                   let o = try? JSONSerialization.jsonObject(with: Data(text[a...b].utf8)) as? [String: Any] {
-                    var c: [String: Any] = [:]
-                    for k in ["accent_color", "eye_color", "background_color"] {
-                        if let v = o[k] as? String, v.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil { c[k] = v.uppercased() }
-                    }
-                    if let v = o["animations"] as? Bool { c["animations"] = v }
-                    if o["reset"] as? Bool == true { c["reset"] = true }
-                    if !c.isEmpty { changes = c }
-                }
-            }
+            let r = runClaude(["-p", "--model", "haiku", "--tools", "", "--strict-mcp-config", "--no-session-persistence"], input: p, timeout: 45)
+            let o = lastJSONObject(r.out, key: "reply")
             DispatchQueue.main.async {
-                if let changes { self.applyAppearance(changes) }
-                else if !self.items.contains(t) {
-                    self.items.append(t); self.save()
-                    self.status = .done("נשמר כהוראה לנקודות ולסיכומים")
-                } else { self.status = .failed("לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה") }
+                self.busy = nil
+                guard let o else {
+                    self.say(r.timedOut ? "לא הספקתי לחשוב על זה בזמן. נסה שוב בעוד רגע." : (self.design ? "לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה, או עיניים ירוקות." : "לא הצלחתי לחשוב על זה עכשיו. בדוק ש-Claude מחובר ונסה שוב."), error: true)
+                    self.next(); return
+                }
+                let restyle = self.apply(o["actions"] as? [[String: Any]] ?? [], userText: t)
+                let reply = ((o["reply"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "—", with: "-")
+                self.say(reply.isEmpty ? (self.design ? "לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה." : "לא בטוח שהבנתי. תוכל לנסח אחרת?") : reply)
+                if restyle { self.restyleLast() } else { self.next() }
             }
         }
     }
-    // הסיכום האחרון בתיקיית ההקלטות
-    func lastSummary() -> URL? {
-        let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(at: recDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
-        return files.filter { $0.pathExtension == "md" && !$0.lastPathComponent.hasSuffix(" נקודות.md") }
-            .max { (a, b) in
-                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return da < db }
+    // מחיל את הפעולות שטימי החליט עליהן. מחזיר true אם צריך להחיל על השיחה האחרונה
+    private func apply(_ actions: [[String: Any]], userText: String) -> Bool {
+        var looks: [String: Any] = [:], changed = false, restyle = false, pdfText: String?
+        for a in actions {
+            let text = ((a["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            switch a["type"] as? String ?? "" {
+            case "appearance":
+                for (k, v) in validLooks(a["changes"] as? [String: Any] ?? [:]) { looks[k] = v }
+            case "add_instruction" where !design && !text.isEmpty:
+                if !items.contains(text) { items.append(text); changed = true }
+            case "remove_instruction" where !design && !text.isEmpty:
+                if let i = items.firstIndex(of: text) ?? items.firstIndex(where: { $0.localizedCaseInsensitiveContains(text) || text.localizedCaseInsensitiveContains($0) }) {
+                    items.remove(at: i); changed = true
+                }
+            case "pdf_instruction" where !design && !text.isEmpty: pdfText = text
+            case "apply_to_last_call" where !design: restyle = asksLastCall(userText)
+            default: break
+            }
+        }
+        if !looks.isEmpty { Theme.apply(looks) }
+        if changed { saveItems() }
+        if let p = pdfText { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: p) } }
+        return restyle
     }
     // מחיל את ההוראות על הסיכום האחרון (live.py --restyle)
-    func improveLast() {
-        guard status != .working else { return }
-        if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { add() }
-        guard !items.isEmpty else { status = .failed("קודם תכתוב מה לשפר"); return }
-        guard let md = lastSummary() else { status = .failed("עוד אין שיחות שמורות"); return }
-        status = .working
+    private func restyleLast() {
+        guard !items.isEmpty else { say("עוד אין לי הוראות להחיל."); next(); return }
+        guard let md = lastSummaryFile() else { say("עוד אין שיחות שמורות, אז אין על מה להחיל."); next(); return }
+        busy = "מחיל על השיחה האחרונה…"
         let p = Process(); p.executableURL = URL(fileURLWithPath: python)
         p.arguments = [worker, "--restyle", md.path]
         let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle(forWritingAtPath: "/dev/null")
         p.terminationHandler = { _ in
             let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             DispatchQueue.main.async {
-                if text.contains("\"changed\": true") {
-                    self.status = .done("שופר: " + callTitle(md))
-                    NSWorkspace.shared.activateFileViewerSelecting([md])
-                } else if text.contains("\"changed\": false") {
-                    self.status = .failed("הסיכום לא השתנה: Claude לא הצליח לכתוב אותו לפי ההוראות בלי לשבור את המבנה. נסה לנסח אחרת")
-                } else { self.status = .failed("לא הצלחתי להריץ את השיפור. בדוק שה-Claude מחובר") }
+                self.busy = nil
+                if text.contains("\"changed\": true") { self.say("סידרתי גם את: " + callTitle(md) + " ✓"); revealInFinder(md) }
+                else if text.contains("\"changed\": false") { self.say("לא הצלחתי לשכתב את הסיכום לפי ההוראות בלי לשבור את המבנה. נסה לנסח אחרת.", error: true) }
+                else { self.say("לא הצלחתי להריץ את השיפור. בדוק ש-Claude מחובר.", error: true) }
+                self.next()
             }
         }
-        do { try p.run() } catch { status = .failed("שגיאה בהפעלה") }
+        do { try p.run() } catch { busy = nil; say("שגיאה בהפעלה", error: true); next() }
     }
 }
+// הסיכום האחרון בתיקיית ההקלטות
+func lastSummaryFile() -> URL? {
+    let fm = FileManager.default
+    guard let files = try? fm.contentsOfDirectory(at: recDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
+    return files.filter { $0.pathExtension == "md" && !$0.lastPathComponent.hasSuffix(" נקודות.md") }
+        .max { (a, b) in
+            let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return da < db }
+}
 
-struct ImproveView: View {
-    @ObservedObject var m: ImproveModel
+struct TimmyChatView: View {
+    @ObservedObject var m: TimmyChatModel
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack(spacing: 14) {
-                if let img = resImage("timmy") {
-                    Image(nsImage: img).resizable().interpolation(.high).frame(width: 58, height: 58)
-                        .shadow(color: amber.opacity(0.35), radius: 12)
-                }
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(he("שפר את טימי")).font(.system(size: 24, weight: .bold)).foregroundColor(.white)
-                    Text(he("תגיד לי מה לשנות בנקודות, בסיכומים או במראה.\nאזכור את זה לכל השיחות הבאות."))
-                        .font(.system(size: 13)).foregroundColor(.white.opacity(0.6)).lineSpacing(3)
-                }
-            }
-            .padding(.top, 48)
-
-            // שדה כתיבה
-            HStack(spacing: 8) {
-                TextField("למשל: תוסיף סעיף של שאלות פתוחות", text: $m.draft)
-                    .textFieldStyle(.plain).font(.system(size: 14)).foregroundColor(.white)
-                    .padding(.vertical, 10).padding(.horizontal, 12)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
-                    .onSubmit { m.add() }
-                Button(action: { m.add() }) {
-                    Text("הוסף").font(.system(size: 13, weight: .semibold)).foregroundColor(.black)
-                        .padding(.vertical, 9).padding(.horizontal, 16).background(Capsule().fill(amber))
-                }.buttonStyle(.plain)
-            }
-
-            // דוגמאות
-            Text("רעיונות").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
-            FlowChips(items: Array(m.examples.filter { !m.items.contains($0) }.prefix(6))) { m.add($0) }
-
-            AppearanceRow(m: m)
-
-            InstructionsList(m: m).frame(maxHeight: .infinity)
-
-            ImproveFooter(m: m)
+        VStack(alignment: .leading, spacing: 12) {
+            TimmyChatHeader(design: m.design)
+            TimmyChatScroll(m: m)
+            if !m.design { MemoryPanel(m: m) }
+            AppearanceRow { m.resetLooks() }
+            TimmyChatInput(m: m)
             HStack { Spacer(); CreatorBadge(); Spacer() }
         }
-        .padding(.horizontal, 36).padding(.bottom, 26)
-        .frame(width: 620, height: 820)
+        .id(Theme.version)   // שינוי מראה: כל הבועות מתרעננות בצבע החדש
+        .padding(.horizontal, 32).padding(.bottom, 18)
+        .frame(minWidth: 600, maxWidth: .infinity, minHeight: 720, maxHeight: .infinity)
         .background(bgColor)
         .environment(\.layoutDirection, .rightToLeft)
+        .environment(\.colorScheme, .dark)
+        .onAppear { m.load() }
+    }
+}
+struct TimmyChatHeader: View {
+    let design: Bool
+    var body: some View {
+        HStack(spacing: 14) {
+            if let img = resImage("timmy") {
+                Image(nsImage: img).resizable().interpolation(.high).frame(width: 52, height: 52).shadow(color: amber.opacity(0.35), radius: 12)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(he(design ? "עצב את טימי" : "שפר את טימי")).font(.system(size: 24, weight: .bold)).foregroundColor(.white)
+                Text(he(design ? "תגיד לי איך טימי ייראה: צבעים, עיניים, רקע, אנימציות." : "כותבים לטימי מה לשנות, והוא משתנה. נשמר לכל השיחות הבאות."))
+                    .font(.system(size: 13)).foregroundColor(.white.opacity(0.6))
+            }
+        }
+        .padding(.top, 44)
+    }
+}
+struct TimmyChatScroll: View {
+    @ObservedObject var m: TimmyChatModel
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(Array(m.msgs.enumerated()), id: \.element.id) { i, msg in
+                        ChatBubble(msg: msg)
+                        if i == 0 { FlowChips(items: m.suggestions) { m.send($0) }.padding(.leading, 38) }
+                    }
+                    if let b = m.busy { TypingBubble(text: b) }
+                    Color.clear.frame(height: 1).id("end")
+                }
+                .padding(.vertical, 6)
+            }
+            .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: m.msgs.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+            .onChange(of: m.busy) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+        }
+        .frame(maxHeight: .infinity)
+    }
+}
+struct TimmyChatInput: View {
+    @ObservedObject var m: TimmyChatModel
+    var body: some View {
+        HStack(spacing: 8) {
+            RTLField(placeholder: m.design ? "למשל: עיניים ירוקות, רקע כחול כהה" : "תכתוב לטימי מה לשנות…", text: $m.input, onSubmit: { m.send() })
+                .padding(.vertical, 10).padding(.horizontal, 14)
+                .background(RoundedRectangle(cornerRadius: 19).fill(Color.white.opacity(0.08)))
+            Button(action: { m.send() }) {
+                Image(systemName: "arrow.up").font(.system(size: 15, weight: .bold)).foregroundColor(.black)
+                    .frame(width: 38, height: 38).background(Circle().fill(amber))
+            }.buttonStyle(.plain)
+        }
+    }
+}
+// "מה אני זוכר": ההוראות השמורות, אפשר למחוק
+struct MemoryPanel: View {
+    @ObservedObject var m: TimmyChatModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: { withAnimation(.easeOut(duration: 0.2)) { m.showMemory.toggle() } }) {
+                HStack(spacing: 6) {
+                    Image(systemName: m.showMemory ? "chevron.down" : "chevron.left").font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.5))
+                    Text(he("מה אני זוכר (\(m.items.count))")).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.white.opacity(0.75))
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            if m.showMemory { MemoryList(m: m) }
+        }
+        .padding(.vertical, 8).padding(.horizontal, 12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
+    }
+}
+struct MemoryList: View {
+    @ObservedObject var m: TimmyChatModel
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 5) {
+                if m.items.isEmpty {
+                    Text(he("עוד לא ביקשת ממני כלום. אני מסכם בסגנון ברירת המחדל.")).font(.system(size: 12.5))
+                        .foregroundColor(.white.opacity(0.4)).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                ForEach(m.items, id: \.self) { t in
+                    HStack(spacing: 8) {
+                        Circle().fill(amber).frame(width: 5, height: 5)
+                        Text(he(t)).font(.system(size: 12.5)).foregroundColor(.white.opacity(0.9)).frame(maxWidth: .infinity, alignment: .leading)
+                        Button(action: { m.removeItem(t) }) {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.5))
+                                .padding(5).background(Circle().fill(Color.white.opacity(0.08)))
+                        }.buttonStyle(.plain).help("למחוק")
+                    }
+                    .padding(.vertical, 6).padding(.horizontal, 10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
+                }
+            }
+        }
+        .frame(maxHeight: 150)
     }
 }
 
-// שורת "מראה" בחלון השיפור: צבעים, אנימציות, איפוס
+// שורת "מראה": צבעים, אנימציות, איפוס
 struct AppearanceRow: View {
-    @ObservedObject var m: ImproveModel
+    let reset: () -> Void
     var swatches: [(String, String)] {
         let eye: String = Theme.eyeHex.isEmpty ? Theme.accentHex : Theme.eyeHex
-        return [("אפליקציה", Theme.accentHex), ("עיניים", eye), ("רקע", Theme.bgHex)]
+        return [("הדגשה", Theme.accentHex), ("עיניים", eye), ("רקע", Theme.bgHex)]
     }
     var body: some View {
-            HStack(spacing: 12) {
-                Text(he("מראה")).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.85))
-                ForEach(swatches, id: \.0) { item in
-                    HStack(spacing: 5) {
-                        Circle().fill(colorFromHex(item.1)).frame(width: 14, height: 14)
-                            .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
-                        Text(he(item.0)).font(.system(size: 11)).foregroundColor(.white.opacity(0.6))
-                    }
-                }
-                Text(he(Theme.animations ? "אנימציות פעילות" : "אנימציות כבויות")).font(.system(size: 11)).foregroundColor(.white.opacity(0.6))
-                Spacer()
-                if !Theme.isDefault {
-                    Button(action: { m.applyAppearance(["reset": true]) }) {
-                        Text(he("אפס מראה")).font(.system(size: 12)).foregroundColor(.white.opacity(0.7))
-                            .padding(.vertical, 5).padding(.horizontal, 10).background(Capsule().fill(Color.white.opacity(0.08)))
-                    }.buttonStyle(.plain)
+        HStack(spacing: 12) {
+            Text(he("מראה")).font(.system(size: 12.5, weight: .medium)).foregroundColor(.white.opacity(0.85))
+            ForEach(swatches, id: \.0) { item in
+                HStack(spacing: 5) {
+                    Circle().fill(colorFromHex(item.1)).frame(width: 13, height: 13)
+                        .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                    Text(he(item.0)).font(.system(size: 11)).foregroundColor(.white.opacity(0.6))
                 }
             }
-            .padding(.vertical, 8).padding(.horizontal, 12)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
-    }
-}
-
-struct InstructionsList: View {
-    @ObservedObject var m: ImproveModel
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // ההוראות השמורות
-            Text("ההוראות שלך (\(m.items.count))").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
-            ScrollView {
-                VStack(spacing: 6) {
-                    if m.items.isEmpty {
-                        Text("עוד אין הוראות. טימי כותב בסגנון ברירת המחדל.").font(.system(size: 13))
-                            .foregroundColor(.white.opacity(0.4)).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
-                    }
-                    ForEach(Array(m.items.enumerated()), id: \.offset) { i, t in
-                        HStack(spacing: 8) {
-                            Circle().fill(amber).frame(width: 5, height: 5)
-                            Text(he(t)).font(.system(size: 13)).foregroundColor(.white.opacity(0.9))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Button(action: { m.remove(i) }) {
-                                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.5))
-                                    .padding(6).background(Circle().fill(Color.white.opacity(0.08)))
-                            }.buttonStyle(.plain)
-                        }
-                        .padding(.vertical, 8).padding(.horizontal, 12)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
-                    }
-                }
+            Text(he(Theme.animations ? "אנימציות פועלות" : "אנימציות כבויות")).font(.system(size: 11)).foregroundColor(.white.opacity(0.6))
+            Spacer()
+            if !Theme.isDefault {
+                Button(action: reset) {
+                    Text(he("אפס מראה")).font(.system(size: 12)).foregroundColor(.white.opacity(0.7))
+                        .padding(.vertical, 4).padding(.horizontal, 10).background(Capsule().fill(Color.white.opacity(0.08)))
+                }.buttonStyle(.plain)
             }
-            .frame(minHeight: 70, maxHeight: .infinity)
         }
+        .padding(.vertical, 7).padding(.horizontal, 12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
     }
 }
 
@@ -1351,39 +1493,6 @@ struct InstructionsList: View {
 func callTitle(_ url: URL) -> String {
     let n = url.deletingPathExtension().lastPathComponent
     return n.replacingOccurrences(of: "^\\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}(-\\d{2})? ", with: "", options: .regularExpression)
-}
-
-struct ImproveFooter: View {
-    @ObservedObject var m: ImproveModel
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // פעולה משנית: להחיל את ההוראות גם על השיחה האחרונה (מופיע רק כשיש הוראות לסיכום ויש שיחה שמורה)
-            if !m.items.isEmpty, let last = m.lastSummary() {
-                HStack(spacing: 10) {
-                    Text(he("להחיל את ההוראות גם על השיחה האחרונה?"))
-                        .font(.system(size: 12)).foregroundColor(.white.opacity(0.6))
-                    Spacer(minLength: 8)
-                    Button(action: { m.improveLast() }) {
-                        HStack(spacing: 6) {
-                            if m.status == .working { ProgressView().controlSize(.mini) }
-                            Text(he(m.status == .working ? "מחיל…" : "החל על: " + callTitle(last)))
-                                .font(.system(size: 12, weight: .medium)).foregroundColor(amber).lineLimit(1).truncationMode(.tail)
-                        }
-                        .padding(.vertical, 6).padding(.horizontal, 12)
-                        .background(Capsule().stroke(amber.opacity(0.5), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain).disabled(m.status == .working).frame(maxWidth: 300)
-                }
-                .padding(.vertical, 8).padding(.horizontal, 12)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.04)))
-            }
-            switch m.status {
-            case .done(let name): Text(he("✓ " + name)).font(.system(size: 12)).foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35)).lineLimit(1)
-            case .failed(let why): Text(he(why)).font(.system(size: 12)).foregroundColor(Color(red: 1, green: 0.4, blue: 0.4))
-            default: Text(he("שינויים במראה חלים מיד. הוראות לנקודות ולסיכומים חלות מהשיחה הבאה. הוראות על ה-PDF עוברות לעיצוב ה-PDF.")).font(.system(size: 11)).foregroundColor(.white.opacity(0.4))
-            }
-        }
-    }
 }
 
 // שבבי דוגמאות שנשברים לשורות
@@ -2488,7 +2597,448 @@ func findGreenolink(_ list: [MCPServer]) -> MCPServer? {
     return c.first(where: \.connected) ?? c.first
 }
 
-enum WAState: Equatable { case unknown, checking, connected(MCPServer), needsAuth(MCPServer), missing, noClaude }
+enum WAState: Equatable { case unknown, checking, linked, connected(MCPServer), needsAuth(MCPServer), missing, noClaude
+    // linked = לטימי יש טוקן משלו (שליחה ישירה). connected = גיבוי שקט: Greenolink מחובר ל-Claude Code
+    var canSend: Bool { if case .connected = self { return true }; return self == .linked }
+}
+
+// MARK: - Greenolink ישירות: OAuth 2.1 + PKCE מהאפליקציה ולקוח MCP קטן. בלי טרמינל ובלי Claude Code
+// TIMMY_GREENOLINK_BASE: שרת חלופי (בדיקות מול שרת מדומה). TIMMY_KEYCHAIN_SERVICE: שם חלופי ב-Keychain
+let glEnv = ProcessInfo.processInfo.environment
+let greenolinkBase: URL = {
+    var s = glEnv["TIMMY_GREENOLINK_BASE"].flatMap { $0.isEmpty ? nil : $0 } ?? "https://mcp.greenolink.com"
+    while s.hasSuffix("/") { s.removeLast() }
+    return URL(string: s)!
+}()
+
+struct GLError: Error {
+    let msg: String
+    var auth = false        // צריך לחבר מחדש
+    var cancelled = false
+}
+let glNeedReconnect = GLError(msg: "החיבור לוואטסאפ פג. לחץ \"חבר וואטסאפ\" כדי לחבר מחדש (לחיצה אחת).", auth: true)
+
+// הטוקנים ופרטי הרישום נשמרים ב-Keychain (לא ב-config.json), פריט אחד לכל שרת
+enum GLKeychain {
+    static let service = glEnv["TIMMY_KEYCHAIN_SERVICE"].flatMap { $0.isEmpty ? nil : $0 } ?? "Timmy Greenolink"
+    static var account: String { (greenolinkBase.host ?? "greenolink") + (greenolinkBase.port.map { ":\($0)" } ?? "") }
+    static func query() -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
+    }
+    static func load() -> [String: Any] {
+        var q = query(); q[kSecReturnData as String] = true; q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let d = out as? Data,
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+        return o
+    }
+    @discardableResult static func save(_ o: [String: Any]) -> Bool {
+        guard let d = try? JSONSerialization.data(withJSONObject: o) else { return false }
+        let st = SecItemUpdate(query() as CFDictionary, [kSecValueData as String: d] as CFDictionary)
+        if st != errSecItemNotFound { return st == errSecSuccess }
+        var q = query(); q[kSecValueData as String] = d; q[kSecAttrLabel as String] = "טימי: חיבור וואטסאפ (Greenolink)"
+        return SecItemAdd(q as CFDictionary, nil) == errSecSuccess
+    }
+    static func delete() { SecItemDelete(query() as CFDictionary) }
+}
+
+let glSession: URLSession = {
+    let c = URLSessionConfiguration.ephemeral
+    c.timeoutIntervalForRequest = 30; c.timeoutIntervalForResource = 180
+    c.httpCookieStorage = nil; c.httpShouldSetCookies = false; c.urlCache = nil
+    return URLSession(configuration: c)
+}()
+final class GLNoRedirect: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ s: URLSession, task: URLSessionTask, willPerformHTTPRedirection r: HTTPURLResponse, newRequest: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
+func glHTTP(_ req: URLRequest, follow: Bool = true) async throws -> (Data, HTTPURLResponse) {
+    do {
+        let (d, r) = follow ? try await glSession.data(for: req) : try await glSession.data(for: req, delegate: GLNoRedirect())
+        guard let h = r as? HTTPURLResponse else { throw GLError(msg: "תשובה לא תקינה מ-Greenolink") }
+        return (d, h)
+    } catch let e as GLError { throw e
+    } catch let e as URLError {
+        switch e.code {
+        case .timedOut: throw GLError(msg: "Greenolink לא ענה בזמן. נסה שוב בעוד רגע")
+        case .notConnectedToInternet, .networkConnectionLost: throw GLError(msg: "אין חיבור לאינטרנט")
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed: throw GLError(msg: "לא הצלחתי להגיע לשרת של Greenolink")
+        case .cancelled: throw GLError(msg: "בוטל", cancelled: true)
+        default: throw GLError(msg: "שגיאת רשת מול Greenolink (\(e.code.rawValue))")
+        }
+    } catch { throw GLError(msg: "שגיאת רשת מול Greenolink") }
+}
+func glJSON(_ d: Data) -> [String: Any]? { try? JSONSerialization.jsonObject(with: d) as? [String: Any] }
+func glForm(_ p: [String: String]) -> Data {
+    let ok = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+    return Data(p.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: ok) ?? "")" }.joined(separator: "&").utf8)
+}
+func glRandom(_ n: Int) -> String {
+    var b = [UInt8](repeating: 0, count: n)
+    _ = SecRandomCopyBytes(kSecRandomDefault, n, &b)
+    return glB64(Data(b))
+}
+func glB64(_ d: Data) -> String {
+    d.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+}
+
+// תוצאה חד-פעמית שאפשר לחכות לה (קוד מהדפדפן / האזנה מוכנה)
+final class GLOneShot<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<T, Error>?
+    private var result: Result<T, Error>?
+    var isDone: Bool { lock.lock(); defer { lock.unlock() }; return result != nil }
+    func wait() async throws -> T {
+        try await withCheckedThrowingContinuation { (c: CheckedContinuation<T, Error>) in
+            lock.lock()
+            if let r = result { lock.unlock(); c.resume(with: r) } else { cont = c; lock.unlock() }
+        }
+    }
+    func finish(_ r: Result<T, Error>) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = r; let c = cont; cont = nil
+        lock.unlock()
+        c?.resume(with: r)
+    }
+}
+
+// האזנה מקומית (127.0.0.1 בלבד) שמקבלת את החזרה מהדפדפן ומראה עמוד "חזור לטימי" (RFC 8252)
+final class GLLoopback: @unchecked Sendable {
+    let listener: NWListener
+    private(set) var port: UInt16 = 0
+    var expectedState = ""
+    let result = GLOneShot<String>()
+    private let q = DispatchQueue(label: "timmy.oauth.loopback")
+    private init(_ l: NWListener) { listener = l }
+
+    static func start(port: UInt16) async throws -> GLLoopback {
+        let p = NWParameters.tcp
+        p.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port) ?? .any)
+        guard let l = try? NWListener(using: p) else { throw GLError(msg: "לא הצלחתי לפתוח חיבור מקומי לקבלת האישור") }
+        let me = GLLoopback(l)
+        let ready = GLOneShot<UInt16>()
+        l.stateUpdateHandler = { st in
+            switch st {
+            case .ready: ready.finish(.success(l.port?.rawValue ?? 0))
+            case .failed, .cancelled: ready.finish(.failure(GLError(msg: "לא הצלחתי לפתוח חיבור מקומי לקבלת האישור")))
+            default: break
+            }
+        }
+        l.newConnectionHandler = { [weak me] c in me?.accept(c) }
+        l.start(queue: me.q)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { ready.finish(.failure(GLError(msg: "לא הצלחתי לפתוח חיבור מקומי לקבלת האישור"))) }
+        do { me.port = try await ready.wait() } catch { l.cancel(); throw error }
+        return me
+    }
+    func stop() { listener.cancel() }
+
+    private func accept(_ c: NWConnection) {
+        c.start(queue: q)
+        read(c, Data())
+    }
+    private func read(_ c: NWConnection, _ buf: Data) {
+        c.receive(minimumIncompleteLength: 1, maximumLength: 16384) { [weak self] d, _, done, err in
+            guard let self else { c.cancel(); return }
+            var b = buf; if let d { b.append(d) }
+            if let end = b.range(of: Data("\r\n\r\n".utf8)) { self.handle(c, String(decoding: b[..<end.lowerBound], as: UTF8.self)); return }
+            if done || err != nil || b.count > 65536 { c.cancel() } else { self.read(c, b) }
+        }
+    }
+    private func handle(_ c: NWConnection, _ head: String) {
+        let target = head.components(separatedBy: "\r\n").first?.components(separatedBy: " ").dropFirst().first ?? ""
+        guard target.hasPrefix("/callback"), let comps = URLComponents(string: "http://127.0.0.1" + target) else {
+            respond(c, status: "404 Not Found", body: ""); return
+        }
+        var p: [String: String] = [:]
+        for i in comps.queryItems ?? [] { p[i.name] = i.value ?? "" }
+        if p["state"] != expectedState {   // לא מהבקשה שלנו: לא מקבלים
+            respond(c, status: "400 Bad Request", body: glPage(ok: false, text: "הקישור הזה לא שייך לחיבור הנוכחי. חזור לטימי ולחץ שוב \"חבר וואטסאפ\".")); return
+        }
+        if let code = p["code"], !code.isEmpty {
+            respond(c, status: "200 OK", body: glPage(ok: true, text: "וואטסאפ מחובר לטימי. אפשר לסגור את הלשונית ולחזור לטימי.")) { self.result.finish(.success(code)) }
+        } else {
+            let denied = p["error"] == "access_denied"
+            respond(c, status: "200 OK", body: glPage(ok: false, text: denied ? "החיבור לא אושר. אפשר לחזור לטימי ולנסות שוב." : "משהו השתבש בחיבור. חזור לטימי ונסה שוב.")) {
+                self.result.finish(.failure(GLError(msg: denied ? "החיבור לא אושר בדפדפן" : "Greenolink החזיר שגיאה: " + (p["error_description"] ?? p["error"] ?? "לא ידוע"))))
+            }
+        }
+    }
+    private func respond(_ c: NWConnection, status: String, body: String, then: (() -> Void)? = nil) {
+        let b = Data(body.utf8)
+        let h = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(b.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        c.send(content: Data(h.utf8) + b, completion: .contentProcessed { _ in c.cancel(); then?() })
+    }
+}
+// עמוד החזרה בדפדפן: עברית, כהה, בצבע של טימי
+func glPage(ok: Bool, text: String) -> String {
+    let a = Theme.accentHex
+    return """
+    <!doctype html><html dir="rtl" lang="he"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>טימי</title>
+    <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0b0c;color:#f2f2f2;font-family:-apple-system,'Heebo','Arial Hebrew',sans-serif}
+    .c{background:#161618;border:1px solid #2a2a2e;border-radius:18px;padding:34px 30px;width:340px;text-align:center}
+    .i{width:56px;height:56px;border-radius:50%;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:30px;font-weight:700;color:#0b0b0c;background:\(ok ? a : "#ff5a5a")}
+    h1{font-size:20px;margin:0 0 8px}p{color:#a1a1a6;font-size:14px;line-height:1.6;margin:0}</style></head>
+    <body><div class="c"><div class="i">\(ok ? "&#10003;" : "!")</div><h1>\(ok ? "מחובר ✓" : "לא התחבר")</h1><p>\(text)</p></div></body></html>
+    """
+}
+
+actor Greenolink {
+    static let shared = Greenolink()
+    nonisolated static var hasToken: Bool { GLKeychain.load()["refresh_token"] != nil || GLKeychain.load()["access_token"] != nil }
+    private var meta: [String: Any]?
+    private var flow: GLLoopback?
+    private var lastAuthURL: URL?
+    private var refreshing: Task<String, Error>?
+    private var sessionID: String?
+    private var protocolVersion: String?
+    private var ready = false
+    private var rpcID = 0
+
+    // MARK: OAuth
+    private func endpoint(_ key: String, _ def: String) async throws -> URL {
+        if meta == nil {
+            var r = URLRequest(url: greenolinkBase.appendingPathComponent(".well-known/oauth-authorization-server")); r.timeoutInterval = 20
+            let (d, h) = try await glHTTP(r)
+            meta = h.statusCode == 200 ? (glJSON(d) ?? [:]) : [:]
+        }
+        // נקודות קצה רק על אותו שרת (לא שולחים סודות לשרת אחר)
+        if let s = meta?[key] as? String, let u = URL(string: s), u.host == greenolinkBase.host, u.scheme == greenolinkBase.scheme { return u }
+        return greenolinkBase.appendingPathComponent(def)
+    }
+    private func register(redirect: String) async throws -> [String: Any] {
+        var r = URLRequest(url: try await endpoint("registration_endpoint", "register"))
+        r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "client_name": "Timmy (טימי)", "redirect_uris": [redirect],
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+            "token_endpoint_auth_method": "client_secret_post"])
+        let (d, h) = try await glHTTP(r)
+        guard (200...201).contains(h.statusCode), let o = glJSON(d), let id = o["client_id"] as? String else {
+            throw GLError(msg: "Greenolink לא אישר את טימי כאפליקציה (\(h.statusCode)). נסה שוב מאוחר יותר")
+        }
+        return ["client_id": id, "client_secret": o["client_secret"] as? String ?? "", "redirect_uri": redirect]
+    }
+    // חיבור מלא: האזנה מקומית -> רישום (פעם אחת) -> דפדפן -> קוד -> טוקנים ב-Keychain
+    func connect(open: @escaping @Sendable (URL) -> Void) async throws {
+        cancelConnect()
+        var kc = GLKeychain.load()
+        let prefPort = (kc["redirect_uri"] as? String).flatMap { URLComponents(string: $0)?.port }.map { UInt16($0) } ?? 0
+        let cb: GLLoopback
+        if prefPort != 0, let c = try? await GLLoopback.start(port: prefPort) { cb = c } else { cb = try await GLLoopback.start(port: 0) }
+        flow = cb
+        defer { cb.stop(); if flow === cb { flow = nil } }
+        let redirect = "http://127.0.0.1:\(cb.port)/callback"
+        let verifier = glRandom(32)
+        let challenge = glB64(Data(SHA256.hash(data: Data(verifier.utf8))))
+        cb.expectedState = glRandom(16)
+        var openURL: URL?
+        for attempt in 0..<2 {
+            if kc["client_id"] == nil || kc["redirect_uri"] as? String != redirect {
+                let c = try await register(redirect: redirect)
+                kc = c   // רישום חדש: טוקנים ישנים שייכים ללקוח הקודם
+                GLKeychain.save(kc)
+            }
+            var comps = URLComponents(url: try await endpoint("authorization_endpoint", "authorize"), resolvingAgainstBaseURL: false)!
+            comps.queryItems = [URLQueryItem(name: "response_type", value: "code"), URLQueryItem(name: "client_id", value: kc["client_id"] as? String),
+                                URLQueryItem(name: "redirect_uri", value: redirect), URLQueryItem(name: "code_challenge", value: challenge),
+                                URLQueryItem(name: "code_challenge_method", value: "S256"), URLQueryItem(name: "state", value: cb.expectedState),
+                                URLQueryItem(name: "resource", value: greenolinkBase.appendingPathComponent("mcp").absoluteString)]
+            let auth = comps.url!
+            // בדיקה מוקדמת בלי לעקוב אחרי הפניה: 302 = תקין (פותחים את דף ההתחברות שהשרת הכין), 400 = הלקוח השמור לא מוכר -> רישום מחדש
+            var r = URLRequest(url: auth); r.timeoutInterval = 20
+            let (_, h) = try await glHTTP(r, follow: false)
+            if (300...399).contains(h.statusCode), let loc = h.value(forHTTPHeaderField: "Location"), let u = URL(string: loc, relativeTo: auth)?.absoluteURL {
+                openURL = (u.host == greenolinkBase.host || u.host == "127.0.0.1") ? u : auth; break
+            }
+            if h.statusCode == 200 { openURL = auth; break }
+            if attempt == 0 && (400...499).contains(h.statusCode) { kc = [:]; continue }
+            throw GLError(msg: "Greenolink לא פתח את דף ההתחברות (\(h.statusCode)). נסה שוב מאוחר יותר")
+        }
+        guard let u = openURL else { throw GLError(msg: "Greenolink לא פתח את דף ההתחברות") }
+        if cb.result.isDone { throw GLError(msg: "בוטל", cancelled: true) }   // בוטל בזמן ההכנה: לא פותחים דפדפן
+        lastAuthURL = u
+        open(u)
+        let timeout = Task { try? await Task.sleep(nanoseconds: 15 * 60 * 1_000_000_000); cb.result.finish(.failure(GLError(msg: "עברו 15 דקות בלי אישור בדפדפן. לחץ שוב \"חבר וואטסאפ\""))) }
+        defer { timeout.cancel() }
+        let code = try await cb.result.wait()
+        _ = try await token(["grant_type": "authorization_code", "code": code, "redirect_uri": redirect, "code_verifier": verifier])
+        resetSession()
+    }
+    func cancelConnect() { flow?.result.finish(.failure(GLError(msg: "בוטל", cancelled: true))) }
+    func reopenBrowser(open: @escaping @Sendable (URL) -> Void) { if let u = lastAuthURL, flow != nil { open(u) } }
+
+    private func token(_ p: [String: String]) async throws -> String {
+        var kc = GLKeychain.load()
+        var r = URLRequest(url: try await endpoint("token_endpoint", "token")); r.httpMethod = "POST"
+        r.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type"); r.setValue("application/json", forHTTPHeaderField: "Accept")
+        var all = p
+        all["client_id"] = kc["client_id"] as? String ?? ""
+        if let s = kc["client_secret"] as? String, !s.isEmpty { all["client_secret"] = s }
+        r.httpBody = glForm(all)
+        let (d, h) = try await glHTTP(r)
+        let o = glJSON(d) ?? [:]
+        guard h.statusCode == 200, let at = o["access_token"] as? String, !at.isEmpty else {
+            let e = o["error"] as? String ?? ""
+            if ["invalid_grant", "invalid_client", "unauthorized_client"].contains(e) || h.statusCode == 401 { throw glNeedReconnect }
+            throw GLError(msg: "Greenolink החזיר שגיאה בהתחברות (\(h.statusCode)). נסה שוב")
+        }
+        kc["access_token"] = at
+        if let rt = o["refresh_token"] as? String, !rt.isEmpty { kc["refresh_token"] = rt }
+        kc["expires_at"] = Date().timeIntervalSince1970 + ((o["expires_in"] as? Double) ?? 3600)
+        guard GLKeychain.save(kc) else { throw GLError(msg: "לא הצלחתי לשמור את החיבור ב-Keychain") }
+        return at
+    }
+    // טוקן בתוקף. מתחדש לבד לפני שפג (או כשהשרת אמר 401). רענון אחד בכל פעם
+    func accessToken(force: Bool = false) async throws -> String {
+        let kc = GLKeychain.load()
+        guard let at = kc["access_token"] as? String else { throw GLError(msg: "וואטסאפ לא מחובר", auth: true) }
+        if !force, (kc["expires_at"] as? Double ?? 0) - 120 > Date().timeIntervalSince1970 { return at }
+        if let t = refreshing { return try await t.value }
+        guard let rt = kc["refresh_token"] as? String else { if force { throw glNeedReconnect }; return at }
+        let t = Task { try await self.token(["grant_type": "refresh_token", "refresh_token": rt]) }
+        refreshing = t
+        defer { refreshing = nil }
+        do { return try await t.value } catch let e as GLError where e.auth { clearTokens(); throw e }
+    }
+    private func clearTokens() {
+        var kc = GLKeychain.load()
+        for k in ["access_token", "refresh_token", "expires_at"] { kc[k] = nil }
+        GLKeychain.save(kc); resetSession()
+    }
+    // ניתוק: מבטלים את הטוקנים בשרת (best effort) ומוחקים אותם מה-Keychain
+    func disconnect() async {
+        let kc = GLKeychain.load()
+        if let url = try? await endpoint("revocation_endpoint", "revoke") {
+            for (k, hint) in [("refresh_token", "refresh_token"), ("access_token", "access_token")] {
+                guard let t = kc[k] as? String else { continue }
+                var r = URLRequest(url: url); r.httpMethod = "POST"; r.timeoutInterval = 10
+                r.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                var p = ["token": t, "token_type_hint": hint, "client_id": kc["client_id"] as? String ?? ""]
+                if let s = kc["client_secret"] as? String, !s.isEmpty { p["client_secret"] = s }
+                r.httpBody = glForm(p)
+                _ = try? await glHTTP(r)
+            }
+        }
+        clearTokens()
+    }
+
+    // MARK: MCP (Streamable HTTP): initialize -> notifications/initialized -> tools/call
+    private func resetSession() { sessionID = nil; protocolVersion = nil; ready = false }
+    private func post(_ body: [String: Any], token: String) async throws -> (Data, HTTPURLResponse) {
+        var r = URLRequest(url: greenolinkBase.appendingPathComponent("mcp")); r.httpMethod = "POST"; r.timeoutInterval = 90
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+        r.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        if let s = sessionID { r.setValue(s, forHTTPHeaderField: "Mcp-Session-Id") }
+        if let v = protocolVersion { r.setValue(v, forHTTPHeaderField: "MCP-Protocol-Version") }
+        r.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return try await glHTTP(r)
+    }
+    private func ensureSession() async throws {
+        if ready { return }
+        let res = try await rpc("initialize", ["protocolVersion": "2025-06-18", "capabilities": [String: Any](),
+                                               "clientInfo": ["name": "timmy", "version": "1.0"]])
+        protocolVersion = res["protocolVersion"] as? String
+        let (_, h) = try await post(["jsonrpc": "2.0", "method": "notifications/initialized"], token: try await accessToken())
+        if h.statusCode == 401 { throw glNeedReconnect }
+        ready = true
+    }
+    private func rpc(_ method: String, _ params: [String: Any], retry: Bool = true) async throws -> [String: Any] {
+        if method != "initialize" { try await ensureSession() }
+        rpcID += 1
+        let id = rpcID
+        let (d, h) = try await post(["jsonrpc": "2.0", "id": id, "method": method, "params": params], token: try await accessToken())
+        if h.statusCode == 401 {
+            guard retry else { throw glNeedReconnect }
+            _ = try await accessToken(force: true)
+            return try await rpc(method, params, retry: false)
+        }
+        if h.statusCode == 404 && sessionID != nil && retry {   // הסשן פג בשרת: מתחילים חדש
+            resetSession(); return try await rpc(method, params, retry: false)
+        }
+        guard (200...299).contains(h.statusCode) else { throw GLError(msg: "Greenolink החזיר שגיאה (\(h.statusCode)). נסה שוב בעוד רגע") }
+        if method == "initialize", let sid = h.value(forHTTPHeaderField: "Mcp-Session-Id"), !sid.isEmpty { sessionID = sid }
+        guard let msg = glRPCMessage(d, contentType: h.value(forHTTPHeaderField: "Content-Type") ?? "", id: id) else {
+            throw GLError(msg: "קיבלתי תשובה לא מובנת מ-Greenolink")
+        }
+        if let e = msg["error"] as? [String: Any] { throw GLError(msg: "Greenolink: " + (e["message"] as? String ?? "שגיאה")) }
+        return msg["result"] as? [String: Any] ?? [:]
+    }
+    func callTool(_ name: String, _ args: [String: Any]) async throws -> Any {
+        let res = try await rpc("tools/call", ["name": name, "arguments": args])
+        let texts = (res["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+        if res["isError"] as? Bool == true { throw GLError(msg: "Greenolink: " + (texts.first ?? "הפעולה נכשלה")) }
+        if let sc = res["structuredContent"] {
+            if let d = sc as? [String: Any], d.count == 1, let r = d["result"] { return r }
+            return sc
+        }
+        let parsed = texts.compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8), options: [.fragmentsAllowed]) }
+        if parsed.count == 1 { return parsed[0] }
+        return parsed.isEmpty ? texts.joined(separator: "\n") : parsed
+    }
+
+    // MARK: הכלים של Greenolink (השמות והפרמטרים מ-main.py)
+    func searchContacts(_ q: String) async throws -> [Candidate] {
+        let r = try await callTool("search_contacts", ["query": q])
+        let list = (r as? [[String: Any]]) ?? ((r as? [Any])?.compactMap { $0 as? [String: Any] }) ?? ((r as? [String: Any]).map { [$0] } ?? [])
+        if let e = list.first?["error"] as? String { throw GLError(msg: "לא הצלחתי לחפש באנשי הקשר: " + e) }
+        return list.compactMap { c -> Candidate? in
+            guard let j = c["jid"] as? String, !j.isEmpty else { return nil }
+            let ph = (c["phone_number"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? j.components(separatedBy: "@").first ?? ""
+            let n = (c["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? prettyPhone(ph)
+            return Candidate(name: n, jid: j, phone: ph)
+        }.prefix(8).map { $0 }
+    }
+    private func ok(_ r: Any, _ what: String) throws {
+        let o = r as? [String: Any] ?? [:]
+        guard o["success"] as? Bool == true else {
+            throw GLError(msg: what + ((o["message"] as? String).flatMap { $0.isEmpty ? nil : ": " + $0 } ?? ""))
+        }
+    }
+    func sendText(_ to: String, _ text: String) async throws {
+        try ok(try await callTool("send_message", ["recipient": to, "message": text]), "ההודעה לא נשלחה")
+    }
+    // קובץ: request_file_upload -> העלאה ל-upload_url (רק לשרת של Greenolink) -> send_file
+    func sendFile(_ to: String, _ file: URL) async throws {
+        guard let data = try? Data(contentsOf: file) else { throw GLError(msg: "לא הצלחתי לקרוא את הקובץ " + file.lastPathComponent) }
+        let r = try await callTool("request_file_upload", ["filename": file.lastPathComponent]) as? [String: Any] ?? [:]
+        guard let uid = r["upload_id"] as? String, let us = r["upload_url"] as? String, let uu = URL(string: us) else {
+            throw GLError(msg: "Greenolink לא הכין העלאה לקובץ" + ((r["message"] as? String).map { ": " + $0 } ?? ""))
+        }
+        guard uu.host == greenolinkBase.host, uu.scheme == greenolinkBase.scheme else { throw GLError(msg: "כתובת ההעלאה לא של Greenolink, לא שלחתי את הקובץ") }
+        var req = URLRequest(url: uu); req.httpMethod = "POST"; req.timeoutInterval = 120
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        let (_, h) = try await glHTTP(req)
+        guard (200...299).contains(h.statusCode) else { throw GLError(msg: h.statusCode == 413 ? "הקובץ גדול מדי לשליחה" : "העלאת הקובץ נכשלה (\(h.statusCode))") }
+        try ok(try await callTool("send_file", ["recipient": to, "upload_id": uid]), "הקובץ לא נשלח")
+    }
+}
+// הודעת JSON-RPC מתוך תשובה: JSON רגיל או text/event-stream (שורות data:)
+func glRPCMessage(_ d: Data, contentType: String, id: Int) -> [String: Any]? {
+    func match(_ o: Any?) -> [String: Any]? {
+        if let a = o as? [Any] { return a.lazy.compactMap { match($0) }.first }
+        guard let m = o as? [String: Any], m["result"] != nil || m["error"] != nil else { return nil }
+        if let i = m["id"] as? Int { return i == id ? m : nil }
+        if let s = m["id"] as? String { return s == String(id) ? m : nil }
+        return m
+    }
+    let text = String(decoding: d, as: UTF8.self)
+    if contentType.contains("text/event-stream") || text.hasPrefix("event:") || text.hasPrefix("data:") {
+        var data: [String] = []
+        for raw in (text + "\n\n").components(separatedBy: "\n") {
+            let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+            if line.isEmpty {
+                if !data.isEmpty, let m = match(try? JSONSerialization.jsonObject(with: Data(data.joined(separator: "\n").utf8))) { return m }
+                data = []
+            } else if line.hasPrefix("data:") {
+                data.append(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces))
+            }
+        }
+        return nil
+    }
+    return match(try? JSONSerialization.jsonObject(with: d))
+}
 
 // MARK: שליחה בוואטסאפ: תמיד בשני שלבים (טיוטה -> אישור -> שליחה)
 enum SendKind: String, CaseIterable, Identifiable {
@@ -2525,15 +3075,32 @@ final class SendSession: ObservableObject {
     @Published var resolving = false
     @Published var resolved: [Candidate]? = nil
     @Published var chosen: Candidate? = nil
+    @Published var resolveError: String? = nil
     var resolvedQuery = ""
+    var direct: Bool { model?.wa == .linked }   // לטימי יש חיבור משלו: בלי Claude
+    // תוצאת חיפוש איש קשר (משותף לחיפוש הישיר ולגיבוי דרך Claude)
+    func applyResolved(_ q: String, _ cands: [Candidate], error: String? = nil) {
+        guard resolvedQuery == q else { return }   // הנמען השתנה בינתיים
+        resolving = false; resolveError = error
+        resolved = error == nil ? cands : nil
+        if cands.count == 1 { chosen = cands[0] }
+    }
     var recipientIsNumber: Bool {
         recipient.filter(\.isNumber).count >= 9 && recipient.range(of: "^[+0-9 ()-]+$", options: .regularExpression) != nil
     }
     func startResolve() {
         let q = recipient.trimmingCharacters(in: .whitespaces)
-        resolvedQuery = q; chosen = nil; resolved = nil
+        resolvedQuery = q; chosen = nil; resolved = nil; resolveError = nil
         guard !q.isEmpty else { return }
         if recipientIsNumber { let d = q.filter(\.isNumber); chosen = Candidate(name: q, jid: d, phone: d); resolved = [chosen!]; return }
+        if direct {
+            resolving = true
+            Task {
+                do { let c = try await Greenolink.shared.searchContacts(q); await MainActor.run { self.applyResolved(q, c) } }
+                catch { await MainActor.run { self.applyResolved(q, [], error: (error as? GLError)?.msg ?? "החיפוש נכשל"); self.model?.authFailed(error) } }
+            }
+            return
+        }
         guard case .connected(let server)? = model?.wa else { return }
         resolving = true
         let prompt = """
@@ -2667,6 +3234,7 @@ final class SendSession: ObservableObject {
     }
     // לפני שליחה: מאתרים את איש הקשר (חיפוש בלבד, בלי הרשאת שליחה) ומראים שם + מספר לאישור. כמה התאמות = בחירה
     func resolveRecipient() {
+        if direct { send(); return }
         guard case .connected(let server)? = model?.wa else { stage = .failed("וואטסאפ לא מחובר"); return }
         if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pdfPath == nil { stage = .failed("ההודעה ריקה"); return }
         let digits = recipient.filter(\.isNumber)
@@ -2699,6 +3267,7 @@ final class SendSession: ObservableObject {
     }
 
     func send(jid: String? = nil) {
+        if direct { sendDirect(jid: jid); return }
         guard case .connected(let server)? = model?.wa else { stage = .failed("וואטסאפ לא מחובר"); return }
         if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pdfPath == nil { stage = .failed("ההודעה ריקה"); return }
         stage = .sending
@@ -2729,6 +3298,42 @@ final class SendSession: ObservableObject {
     }
 }
 
+extension SendSession {
+    // שליחה ישירה דרך Greenolink (בלי Claude): איתור איש קשר אם צריך -> טקסט -> קובץ
+    func sendDirect(jid: String?) {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines), pdf = pdfPath
+        if text.isEmpty && pdf == nil { stage = .failed("ההודעה ריקה"); return }
+        let rec = recipient.trimmingCharacters(in: .whitespaces)
+        let known: Candidate? = jid.map { j in chosen?.jid == j ? chosen! : Candidate(name: rec, jid: j, phone: j.components(separatedBy: "@").first ?? j) }
+            ?? (recipientIsNumber ? Candidate(name: rec, jid: rec.filter(\.isNumber), phone: rec.filter(\.isNumber)) : nil)
+            ?? (resolvedQuery == rec ? chosen : nil)
+        stage = .sending
+        Task {
+            var textSent = false
+            do {
+                var target = known
+                if target == nil {
+                    let c = try await Greenolink.shared.searchContacts(rec)
+                    if c.isEmpty { throw GLError(msg: "לא מצאתי איש קשר בשם \(rec). אפשר לכתוב מספר טלפון") }
+                    if c.count > 1 { await MainActor.run { self.stage = .pick(c) }; return }
+                    target = c[0]
+                }
+                let t = target!
+                if !text.isEmpty { try await Greenolink.shared.sendText(t.jid, text); textSent = true }
+                if let pdf { try await Greenolink.shared.sendFile(t.jid, pdf) }
+                await MainActor.run { self.chosen = t; self.stage = .sent(self.recipientLabel(t)) }
+            } catch {
+                let m = (error as? GLError)?.msg ?? "ההודעה לא נשלחה"
+                let partial = textSent
+                await MainActor.run {
+                    self.stage = .failed(partial ? "ההודעה נשלחה, אבל הקובץ לא: " + m : m)
+                    self.model?.authFailed(error)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - המודל של חלון "השיחות שלי"
 
 final class CallsModel: ObservableObject {
@@ -2741,7 +3346,8 @@ final class CallsModel: ObservableObject {
     @Published var bulletsModelID = configModel("bullets_model", "haiku")
     @Published var pdf: [String: PDFState] = [:]
     @Published var wa: WAState = .unknown
-    @Published var connectNote = ""
+    enum Link: Equatable { case idle, waiting, failed(String) }
+    @Published var link: Link = .idle
     @Published var overlay: Overlay = .none
     @Published var session: SendSession?
     private var signature = ""
@@ -2806,41 +3412,51 @@ final class CallsModel: ObservableObject {
         if wa == .unknown || wa == .missing || wa == .noClaude { checkWhatsApp() }
     }
 
-    // Greenolink: בדיקת חיבור דרך `claude mcp list` (קריאה בלבד)
+    // מצב החיבור: קודם הטוקן של טימי (Keychain). אין? גיבוי שקט: Greenolink מחובר ל-Claude Code (`claude mcp list`, קריאה בלבד)
     func checkWhatsApp() {
         if wa == .checking { return }
+        if Greenolink.hasToken { wa = .linked; return }
+        if (loadConfig()["greenolink_fallback_off"] as? Bool) == true { wa = .missing; return }
         wa = .checking
         DispatchQueue.global().async {
-            guard Onboarding.shared?.claudePath() ?? findClaudePath() != nil else { DispatchQueue.main.async { self.wa = .noClaude }; return }
+            guard Onboarding.shared?.claudePath() ?? findClaudePath() != nil else { DispatchQueue.main.async { self.wa = .missing }; return }
             let r = runClaude(["mcp", "list"], timeout: 60)
             let server = findGreenolink(parseMCPList(r.out))
             DispatchQueue.main.async {
-                if let s = server { self.wa = s.connected ? .connected(s) : .needsAuth(s) } else { self.wa = .missing }
+                if self.wa == .linked { return }
+                if let s = server, s.connected { self.wa = .connected(s) } else { self.wa = .missing }
             }
         }
     }
-    // חיבור: (1) חשבון + QR באתר, (2) הוספת השרת ל-Claude Code, (3) טרמינל עם claude לאישור ב-/mcp
-    func openRegister() { openExternal(greenolinkRegister) }
-    func connectToClaude() {
-        connectNote = "מחבר את Greenolink ל-Claude…"
-        // כבר רשום (למשל מחבר claude.ai בשם "claude.ai whatsapp" שמחכה לאישור): רק מאשרים, לא מוסיפים שוב
-        var needAdd = true, serverName = "greenolink"
-        switch wa { case .needsAuth(let s), .connected(let s): needAdd = false; serverName = s.name; default: break }
-        DispatchQueue.global().async {
-            var ok = true
-            if needAdd {
-                let r = runClaude(["mcp", "add", "--scope", "user", "--transport", "http", "greenolink", greenolinkURL], timeout: 30)
-                ok = r.launched && (r.status == 0 || r.out.localizedCaseInsensitiveContains("already exists"))
-            }
-            DispatchQueue.main.async {
-                guard ok, let path = Onboarding.shared?.claudePath() ?? findClaudePath() else {
-                    self.connectNote = "לא הצלחתי להוסיף את Greenolink ל-Claude. בדוק ש-Claude Code מותקן"; return
+    // לחיצה אחת: דפדפן -> התחברות ל-Greenolink + QR -> אישור -> מחובר
+    func connectGreenolink() {
+        if link == .waiting { return }
+        link = .waiting
+        Task {
+            do {
+                try await Greenolink.shared.connect(open: { u in DispatchQueue.main.async { openExternal(u) } })
+                await MainActor.run {
+                    self.link = .idle; self.wa = .linked
+                    saveConfig(["greenolink_fallback_off": false])
+                    if !dryOpen { NSApp.activate(ignoringOtherApps: true) }
+                    if self.session != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { if self.overlay == .connect { self.overlay = .send } } }
                 }
-                self.connectNote = "נפתח טרמינל עם Claude. בחר שם את \(serverName), אשר בדפדפן, ואז לחץ \"בדוק שוב\"."
-                runInTerminal("clear; echo 'טימי: כדי לחבר את הוואטסאפ, הקלד /mcp, בחר \(serverName) ואשר בדפדפן שנפתח. אחר כך חזור לטימי ולחץ בדוק שוב.'; echo; '\(path)'")
+            } catch {
+                let e = error as? GLError
+                await MainActor.run { self.link = e?.cancelled == true ? .idle : .failed(e?.msg ?? "החיבור נכשל. נסה שוב") }
             }
         }
     }
+    func cancelConnect() { link = .idle; Task { await Greenolink.shared.cancelConnect() } }
+    func reopenBrowser() { Task { await Greenolink.shared.reopenBrowser(open: { u in DispatchQueue.main.async { openExternal(u) } }) } }
+    func openRegister() { openExternal(greenolinkRegister) }
+    func disconnectGreenolink() {
+        saveConfig(["greenolink_fallback_off": true])   // אחרי "נתק" לא חוזרים בשקט לחיבור דרך Claude
+        wa = .missing
+        Task { await Greenolink.shared.disconnect() }
+    }
+    // הטוקן נדחה ואי אפשר לחדש: מציגים "לא מחובר" (חיבור מחדש = לחיצה אחת)
+    func authFailed(_ e: Error) { if (e as? GLError)?.auth == true, wa == .linked, !Greenolink.hasToken { wa = .missing } }
 }
 
 // MARK: - חלון "השיחות שלי"
@@ -2897,47 +3513,40 @@ struct CallsHeader: View {
     }
 }
 
-// סטטוס וואטסאפ (Greenolink) בכותרת
+// סטטוס וואטסאפ בכותרת: לפי החיבור של טימי עצמו
 struct WhatsAppChip: View {
     @ObservedObject var m: CallsModel
     var connectButton = true
     var body: some View {
         HStack(spacing: 8) {
             icon
-            Text(he("וואטסאפ (Greenolink): " + label)).font(.system(size: 12.5, weight: .medium))
+            Text(he("וואטסאפ: " + label)).font(.system(size: 12.5, weight: .medium))
                 .foregroundColor(.white.opacity(0.85)).lineLimit(1)
-            if showConnect && connectButton {
-                Button(action: { m.overlay = .connect }) {
-                    Text(he("חבר את Greenolink")).font(.system(size: 12, weight: .semibold)).foregroundColor(.black)
+            if !m.wa.canSend && m.wa != .checking && m.link != .waiting && connectButton {
+                Button(action: { m.overlay = .connect; m.connectGreenolink() }) {
+                    Text(he("חבר וואטסאפ")).font(.system(size: 12, weight: .semibold)).foregroundColor(.black)
                         .padding(.vertical, 4).padding(.horizontal, 10).background(Capsule().fill(amber))
                 }.buttonStyle(.plain)
-            } else if m.wa != .checking {
-                Button(action: { m.checkWhatsApp() }) {
-                    Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.55))
-                }.buttonStyle(.plain).help("בדוק שוב")
+            } else if m.wa.canSend {
+                Button(action: { m.overlay = .connect }) {
+                    Image(systemName: "gearshape").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.55))
+                }.buttonStyle(.plain).help("חיבור וואטסאפ")
             }
         }
         .padding(.vertical, 7).padding(.horizontal, 12)
         .background(Capsule().fill(Color.white.opacity(0.06)))
     }
     var label: String {
+        if m.link == .waiting { return "מתחבר…" }
         switch m.wa {
         case .unknown, .checking: return "בודק…"
-        case .connected: return "מחובר ✓"
-        case .needsAuth: return "ממתין לאישור"
-        case .missing: return "לא מחובר"
-        case .noClaude: return "צריך Claude Code"
+        case .linked, .connected: return "מחובר ✓"
+        default: return "לא מחובר"
         }
-    }
-    var showConnect: Bool {
-        switch m.wa { case .needsAuth, .missing: return true; default: return false }
     }
     @ViewBuilder var icon: some View {
-        switch m.wa {
-        case .checking, .unknown: ProgressView().controlSize(.mini)
-        case .connected: Circle().fill(okGreen).frame(width: 8, height: 8)
-        default: Circle().fill(Color.white.opacity(0.3)).frame(width: 8, height: 8)
-        }
+        if m.wa == .checking || m.wa == .unknown || m.link == .waiting { ProgressView().controlSize(.mini) }
+        else { Circle().fill(m.wa.canSend ? okGreen : Color.white.opacity(0.3)).frame(width: 8, height: 8) }
     }
 }
 
@@ -2949,12 +3558,12 @@ struct CallsSettingsBar: View {
             ModelPicker(label: "מודל לסיכומים ול-PDF:", value: m.summaryModelID) { m.setSummaryModel($0) }
             ModelPicker(label: "נקודות בזמן השיחה:", value: m.bulletsModelID) { m.setBulletsModel($0) }
             Spacer(minLength: 8)
-            Button(action: { (NSApp.delegate as? AppDelegate)?.openImprove() }) {
-                Text(he("✨ שפר את טימי")).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.black)
+            Button(action: { (NSApp.delegate as? AppDelegate)?.openDesign() }) {
+                Text(he("✨ עצב את טימי")).font(.system(size: 12.5, weight: .semibold)).foregroundColor(.black)
                     .padding(.vertical, 6).padding(.horizontal, 12)
                     .background(Capsule().fill(amber))
             }.buttonStyle(.plain)
-                .help("הוראות לנקודות ולסיכומים, צבעים, עיניים, רקע ואנימציות")
+                .help("צבעים, עיניים, רקע ואנימציות")
             Button(action: { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: nil) }) {
                 Text(he("עצב את ה-PDF")).font(.system(size: 12.5, weight: .medium)).foregroundColor(amber)
                     .padding(.vertical, 6).padding(.horizontal, 12)
@@ -3204,46 +3813,88 @@ struct PillButton: View {
     }
 }
 
+// חיבור וואטסאפ: כפתור אחד. נפתח דפדפן, מתחברים ל-Greenolink, סורקים QR, וחוזרים ל"מחובר ✓"
 struct ConnectCard: View {
     @ObservedObject var m: CallsModel
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            CardTitle(title: "חיבור וואטסאפ (Greenolink)", sub: "טימי שולח בוואטסאפ דרך Claude Code והמחבר Greenolink. שלושה צעדים, פעם אחת.")
-            ConnectStep(n: 1, text: "פותחים חשבון ב-Greenolink וסורקים את קוד ה-QR מהוואטסאפ בטלפון.", button: "פתח את Greenolink") { m.openRegister() }
-            ConnectStep(n: 2, text: "מחברים את Greenolink ל-Claude. בטרמינל שייפתח מקלידים את הפקודה הזאת, בוחרים greenolink ומאשרים בדפדפן:", command: "/mcp", button: "חבר ל-Claude") { m.connectToClaude() }
-            ConnectStep(n: 3, text: "חוזרים לכאן ובודקים שהכל מחובר.", button: m.wa == .checking ? "בודק…" : "בדוק שוב") { m.checkWhatsApp() }
-            if !m.connectNote.isEmpty {
-                Text(he(m.connectNote)).font(.system(size: 12.5)).foregroundColor(amber.opacity(0.9)).fixedSize(horizontal: false, vertical: true)
-            }
-            HStack {
-                WhatsAppChip(m: m, connectButton: false)
-                Spacer()
-                PillButton(title: "סגור") { m.overlay = m.session == nil ? .none : .send }
+            CardTitle(title: "חיבור וואטסאפ", sub: "טימי שולח הודעות וקבצים מהוואטסאפ שלך, דרך Greenolink.")
+            ConnectBody(m: m)
+            if m.link != .waiting {
+                HStack { Spacer(); PillButton(title: "סגור") { m.overlay = m.session == nil ? .none : .send } }
             }
         }
     }
 }
-struct ConnectStep: View {
-    let n: Int, text: String
-    var command: String? = nil   // פקודה להקלדה: מוצגת כשבב נפרד משמאל לימין (בתוך משפט בעברית הלוכסן מתהפך)
-    let button: String, action: () -> Void
+struct ConnectBody: View {
+    @ObservedObject var m: CallsModel
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text("\(n)").font(.system(size: 13, weight: .bold)).foregroundColor(.black)
-                .frame(width: 24, height: 24).background(Circle().fill(amber))
-            VStack(alignment: .leading, spacing: 6) {
-                Text(he(text)).font(.system(size: 13.5)).foregroundColor(.white.opacity(0.85)).lineSpacing(3)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let command {
-                    Text(command).font(.system(size: 13, weight: .semibold, design: .monospaced)).foregroundColor(amber)
-                        .padding(.vertical, 3).padding(.horizontal, 9)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.08)))
-                        .environment(\.layoutDirection, .leftToRight)
+        if m.wa == .linked { ConnectedRow(m: m) }
+        else if m.link == .waiting { ConnectWaiting(m: m) }
+        else { ConnectStart(m: m) }
+    }
+}
+struct ConnectStart: View {
+    @ObservedObject var m: CallsModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Button(action: { m.connectGreenolink() }) {
+                HStack(spacing: 9) {
+                    Image(systemName: "link").font(.system(size: 14, weight: .bold))
+                    Text(he("חבר וואטסאפ")).font(.system(size: 15.5, weight: .bold))
                 }
+                .foregroundColor(.black).padding(.vertical, 12).padding(.horizontal, 26)
+                .background(Capsule().fill(amber)).shadow(color: amber.opacity(0.35), radius: 10, y: 3)
+            }.buttonStyle(.plain)
+            Text(he("נפתח דפדפן, מתחברים ל-Greenolink וסורקים QR מהטלפון. פעם אחת."))
+                .font(.system(size: 13)).foregroundColor(.white.opacity(0.6))
+            if case .failed(let why) = m.link {
+                Text(he(why)).font(.system(size: 12.5)).foregroundColor(recRed).fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            PillButton(title: button, action: action)
         }
+    }
+}
+struct ConnectWaiting: View {
+    @ObservedObject var m: CallsModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text(he("מחכה לאישור בדפדפן…")).font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
+            }
+            Text(he("בדפדפן: מתחברים ל-Greenolink, ואז בטלפון: וואטסאפ ← מכשירים מקושרים ← קישור מכשיר, וסורקים את ה-QR. טימי ימשיך לבד."))
+                .font(.system(size: 13)).foregroundColor(.white.opacity(0.65)).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 16) {
+                LinkText(title: "הדפדפן לא נפתח? פתח שוב") { m.reopenBrowser() }
+                LinkText(title: "אין לך חשבון? הרשמה ל-Greenolink") { m.openRegister() }
+                Spacer()
+                PillButton(title: "ביטול") { m.cancelConnect() }
+            }
+        }
+    }
+}
+struct ConnectedRow: View {
+    @ObservedObject var m: CallsModel
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 28)).foregroundColor(okGreen)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(he("מחובר ✓")).font(.system(size: 16, weight: .bold)).foregroundColor(.white)
+                Text(he("טימי שולח ישירות דרך Greenolink. החיבור שמור ב-Keychain של המק.")).font(.system(size: 12.5)).foregroundColor(.white.opacity(0.6))
+            }
+            Spacer()
+            LinkText(title: "נתק", color: .white.opacity(0.5)) { m.disconnectGreenolink() }
+        }
+        .padding(.vertical, 12).padding(.horizontal, 14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(okGreen.opacity(0.08)))
+    }
+}
+struct LinkText: View {
+    let title: String
+    var color: Color = amber
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) { Text(he(title)).font(.system(size: 12.5, weight: .medium)).foregroundColor(color).underline() }.buttonStyle(.plain)
     }
 }
 
@@ -3253,7 +3904,7 @@ struct SendCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             CardTitle(title: "שליחה בוואטסאפ", sub: s.call.title + (s.call.person.isEmpty ? "" : " · " + s.call.person))
-            if case .connected = m.wa { SendStageView(m: m, s: s) }
+            if m.wa.canSend { SendStageView(m: m, s: s) }
             else if m.wa == .checking || m.wa == .unknown {
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text(he("בודק את החיבור לוואטסאפ…")).foregroundColor(.white.opacity(0.7)) }
             } else { SendNotConnected(m: m) }
@@ -3264,10 +3915,10 @@ struct SendNotConnected: View {
     @ObservedObject var m: CallsModel
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(he("כדי לשלוח בוואטסאפ צריך לחבר את Greenolink ל-Claude Code. זה לוקח דקה, פעם אחת."))
+            Text(he("כדי לשלוח בוואטסאפ צריך לחבר אותו פעם אחת. לחיצה אחת, ממשיכים בדפדפן."))
                 .font(.system(size: 14)).foregroundColor(.white.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
-                PillButton(title: "חבר את Greenolink", primary: true) { m.overlay = .connect }
+                PillButton(title: "חבר וואטסאפ", primary: true) { m.overlay = .connect; m.connectGreenolink() }
                 PillButton(title: "ביטול") { m.overlay = .none }
             }
         }
@@ -3442,6 +4093,8 @@ struct RecipientStatus: View {
                         }.buttonStyle(.plain)
                     }
                 }
+            } else if let e = s.resolveError {
+                Text(he(e)).font(.system(size: 12.5)).foregroundColor(Color(red: 1, green: 0.45, blue: 0.45))
             } else if let r = s.resolved, r.isEmpty {
                 Text(he("לא מצאתי איש קשר בשם \(s.resolvedQuery). אפשר לכתוב מספר טלפון.")).font(.system(size: 12.5)).foregroundColor(Color(red: 1, green: 0.45, blue: 0.45))
             }
