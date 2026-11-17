@@ -1,20 +1,20 @@
 {
-  "custom_instructions" : [
-    "Claude Code: תכתוב שמות כלים באנגלית",
-    "5 משימות לכל היותר",
-    "תוסיף סעיף \"שאלות פתוחות\"",
-    "Claude Code: תכתוב בסוף כל סיכום שורת tl;dr",
-    "נקודות קצרות יותר, עד 8 מילים"
-  ],
-  "owner_name" : "יניב",
-  "accent_color" : "#3B82F6",
-  "meetings_dir" : "/Users/yaniv/Projects/timmy/qa-improve/ui/meetings",
-  "animations" : true,
-  "people" : [
-    "דני כהן"
-  ],
-  "background_color" : "#000000",
-  "eye_color" : "",
-  "claude_path" : "/Users/yaniv/.nvm/versions/node/v22.12.0/bin/claude",
-  "output_dir" : "/Users/yaniv/Projects/timmy/qa-improve/ui/out"
+ "custom_instructions": [
+  "Claude Code: תכתוב שמות כלים באנגלית",
+  "5 משימות לכל היותר",
+  "תוסיף סעיף \"שאלות פתוחות\"",
+  "Claude Code: תכתוב בסוף כל סיכום שורת tl;dr",
+  "נקודות קצרות יותר, עד 8 מילים"
+ ],
+ "owner_name": "יניב",
+ "accent_color": "#3B82F6",
+ "meetings_dir": "/Users/yaniv/Projects/timmy/qa-improve/ui/meetings",
+ "animations": true,
+ "people": [
+  "דני כהן"
+ ],
+ "background_color": "#000000",
+ "eye_color": "",
+ "claude_path": "/Users/yaniv/Projects/timmy/qa-improve/fake/slowlog",
+ "output_dir": "/Users/yaniv/Projects/timmy/qa-improve/ui/out"
 }

@@ -1216,26 +1216,40 @@ struct InstructionsList: View {
     }
 }
 
+// שם השיחה בלי התאריך ("2026-11-17 21-40 דנה כהן - הצעת מחיר" -> "דנה כהן - הצעת מחיר")
+func callTitle(_ url: URL) -> String {
+    let n = url.deletingPathExtension().lastPathComponent
+    return n.replacingOccurrences(of: "^\\d{4}-\\d{2}-\\d{2} \\d{2}-\\d{2}(-\\d{2})? ", with: "", options: .regularExpression)
+}
+
 struct ImproveFooter: View {
     @ObservedObject var m: ImproveModel
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // שיפור הסיכום האחרון
-            VStack(spacing: 8) {
-                Button(action: { m.improveLast() }) {
-                    HStack(spacing: 8) {
-                        if m.status == .working { ProgressView().controlSize(.small) }
-                        Text(m.status == .working ? "משפר את הסיכום האחרון…" : "✨ שפר גם את הסיכום של השיחה האחרונה")
-                            .font(.system(size: 14, weight: .semibold)).foregroundColor(.black)
+        VStack(alignment: .leading, spacing: 10) {
+            // פעולה משנית: להחיל את ההוראות גם על השיחה האחרונה (מופיע רק כשיש הוראות לסיכום ויש שיחה שמורה)
+            if !m.items.isEmpty, let last = m.lastSummary() {
+                HStack(spacing: 10) {
+                    Text(he("להחיל את ההוראות גם על השיחה האחרונה?"))
+                        .font(.system(size: 12)).foregroundColor(.white.opacity(0.6))
+                    Spacer(minLength: 8)
+                    Button(action: { m.improveLast() }) {
+                        HStack(spacing: 6) {
+                            if m.status == .working { ProgressView().controlSize(.mini) }
+                            Text(he(m.status == .working ? "מחיל…" : "החל על: " + callTitle(last)))
+                                .font(.system(size: 12, weight: .medium)).foregroundColor(amber).lineLimit(1).truncationMode(.tail)
+                        }
+                        .padding(.vertical, 6).padding(.horizontal, 12)
+                        .background(Capsule().stroke(amber.opacity(0.5), lineWidth: 1))
                     }
-                    .frame(maxWidth: .infinity).padding(.vertical, 11).background(Capsule().fill(amber))
+                    .buttonStyle(.plain).disabled(m.status == .working).frame(maxWidth: 300)
                 }
-                .buttonStyle(.plain).disabled(m.status == .working)
-                switch m.status {
-                case .done(let name): Text(he("✓ " + name)).font(.system(size: 12)).foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35)).lineLimit(1)
-                case .failed(let why): Text(he(why)).font(.system(size: 12)).foregroundColor(Color(red: 1, green: 0.4, blue: 0.4))
-                default: Text("הנקודות החיות והסיכומים של השיחות הבאות כבר ייכתבו לפי ההוראות.").font(.system(size: 11)).foregroundColor(.white.opacity(0.4))
-                }
+                .padding(.vertical, 8).padding(.horizontal, 12)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.04)))
+            }
+            switch m.status {
+            case .done(let name): Text(he("✓ " + name)).font(.system(size: 12)).foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35)).lineLimit(1)
+            case .failed(let why): Text(he(why)).font(.system(size: 12)).foregroundColor(Color(red: 1, green: 0.4, blue: 0.4))
+            default: Text(he("שינויים במראה חלים מיד. הוראות לנקודות ולסיכומים חלות מהשיחה הבאה.")).font(.system(size: 11)).foregroundColor(.white.opacity(0.4))
             }
         }
     }

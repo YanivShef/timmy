@@ -1,0 +1,8 @@
+#!/bin/bash
+echo "start $(date +%s.%N) $$" >> /Users/yaniv/Projects/timmy/qa-improve/tee/slowlog.txt
+python3 -c "
+import sys
+s=sys.stdin.read(); md=s.split('המסמך הנוכחי:\n',1)[1].split('\n\nהתמלול:\n',1)[0]
+print(md.replace('## סיכום','## סיכום (שופר)'))"
+sleep 6
+echo "end $(date +%s.%N) $$" >> /Users/yaniv/Projects/timmy/qa-improve/tee/slowlog.txt
