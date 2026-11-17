@@ -2482,6 +2482,45 @@ final class SendSession: ObservableObject {
     @Published var stage: Stage = .choose
     var pdfPath: URL?
     weak var model: CallsModel?
+    // חיפוש איש הקשר רץ במקביל לניסוח הטיוטה
+    @Published var resolving = false
+    @Published var resolved: [Candidate]? = nil
+    @Published var chosen: Candidate? = nil
+    var resolvedQuery = ""
+    var recipientIsNumber: Bool {
+        recipient.filter(\.isNumber).count >= 9 && recipient.range(of: "^[+0-9 ()-]+$", options: .regularExpression) != nil
+    }
+    func startResolve() {
+        let q = recipient.trimmingCharacters(in: .whitespaces)
+        resolvedQuery = q; chosen = nil; resolved = nil
+        guard !q.isEmpty else { return }
+        if recipientIsNumber { let d = q.filter(\.isNumber); chosen = Candidate(name: q, jid: d, phone: d); resolved = [chosen!]; return }
+        guard case .connected(let server)? = model?.wa else { return }
+        resolving = true
+        let prompt = """
+        קרא ל-\(server.toolPrefix)search_contacts עם query="\(q)" (אם הכלי עוד לא טעון, טען אותו עם ToolSearch). אסור לשלוח שום דבר.
+        החזר שורה אחת של JSON בלבד: {"candidates": [{"name": "...", "jid": "...", "phone": "..."}]} עם כל אנשי הקשר שיכולים להתאים (עד 8), או רשימה ריקה אם אין.
+        """
+        let args = ["-p", "--model", "haiku", "--permission-mode", "dontAsk",
+                    "--tools", "ToolSearch", "--allowedTools", server.toolPrefix + "search_contacts", "--no-session-persistence"]
+        DispatchQueue.global().async {
+            let r = runClaude(args, input: prompt, timeout: 90)
+            let o = lastJSONObject(r.out, key: "candidates")
+            DispatchQueue.main.async {
+                guard self.resolvedQuery == q else { return }   // הנמען השתנה בינתיים
+                let cands = (o?["candidates"] as? [[String: Any]] ?? []).compactMap { c -> Candidate? in
+                    guard let j = c["jid"] as? String, !j.isEmpty else { return nil }
+                    let ph = (c["phone"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? j.components(separatedBy: "@").first ?? ""
+                    return Candidate(name: c["name"] as? String ?? j, jid: j, phone: ph)
+                }
+                self.resolving = false
+                self.resolved = cands
+                if cands.count == 1 { self.chosen = cands[0] }
+            }
+        }
+    }
+    // תיאור נקי של הנמען: "שם · 058-123-4567"
+    func recipientLabel(_ c: Candidate) -> String { c.name + " · " + prettyPhone(c.phone.isEmpty ? c.jid : c.phone) }
     init(call: CallItem, model: CallsModel) {
         self.call = call; self.model = model
         recipient = call.person.components(separatedBy: " - ").first ?? call.person
@@ -2514,6 +2553,7 @@ final class SendSession: ObservableObject {
     }
 
     func makeDraft() {
+        if resolvedQuery != recipient.trimmingCharacters(in: .whitespaces) || resolved == nil { startResolve() }
         if kind == .free && request.trimmingCharacters(in: .whitespaces).isEmpty { stage = .failed("תכתוב מה לשלוח"); return }
         if kind == .pdf && !FileManager.default.fileExists(atPath: call.pdfURL.path) {
             stage = .drafting("מכין PDF…")
@@ -2637,8 +2677,9 @@ final class SendSession: ObservableObject {
                     return Candidate(name: c["name"] as? String ?? j, jid: j, phone: c["phone"] as? String ?? "")
                 }
                 if o["sent"] as? Bool == true {
-                    let to = (o["to"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? self.recipient
-                    self.stage = .sent(to)
+                    let raw = (o["to"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? self.recipient
+                    let cleaned = raw.replacingOccurrences(of: "\\s*\\(?[0-9]+@[a-z.]+\\)?", with: "", options: .regularExpression)
+                    self.stage = .sent(self.chosen.map { self.recipientLabel($0) } ?? cleaned)
                 } else if !cands.isEmpty {
                     self.stage = .pick(cands)
                 } else {
@@ -3281,9 +3322,16 @@ struct SendReview: View {
                 .padding(.vertical, 6).padding(.horizontal, 10).background(Capsule().fill(Color.white.opacity(0.06)))
             }
             FieldBox(label: "אל:", placeholder: "שם איש הקשר או מספר טלפון", text: $s.recipient)
+            RecipientStatus(s: s)
             HStack(spacing: 10) {
-                PillButton(title: "המשך לשליחה ל-" + (s.recipient.isEmpty ? "?" : s.recipient), primary: true) { s.resolveRecipient() }
-                    .disabled(s.recipient.trimmingCharacters(in: .whitespaces).isEmpty)
+                if s.resolvedQuery != s.recipient.trimmingCharacters(in: .whitespaces) {
+                    PillButton(title: "חפש את " + (s.recipient.isEmpty ? "?" : s.recipient), primary: true) { s.startResolve() }
+                        .disabled(s.recipient.trimmingCharacters(in: .whitespaces).isEmpty)
+                } else if let c = s.chosen {
+                    PillButton(title: "שלח ל-" + c.name, primary: true) { s.send(jid: c.jid) }
+                } else {
+                    PillButton(title: "שלח", primary: true) {}.disabled(true)
+                }
                 PillButton(title: "נסח מחדש") { s.makeDraft() }
                 PillButton(title: "חזרה") { s.stage = .choose }
             }
@@ -3322,6 +3370,45 @@ struct SendConfirm: View {
         }
     }
 }
+// מי יקבל את ההודעה: מחפש… / שם · מספר / בחירה מכמה / לא נמצא
+struct RecipientStatus: View {
+    @ObservedObject var s: SendSession
+    var body: some View {
+        Group {
+            if s.resolving {
+                HStack(spacing: 8) { ProgressView().controlSize(.small); Text(he("מחפש את \(s.resolvedQuery) באנשי הקשר…")).font(.system(size: 12.5)).foregroundColor(.white.opacity(0.6)) }
+            } else if let c = s.chosen {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill").foregroundColor(okGreen)
+                    Text(he(c.name)).font(.system(size: 13.5, weight: .semibold)).foregroundColor(.white)
+                    Text(prettyPhone(c.phone.isEmpty ? c.jid : c.phone)).font(.system(size: 13).monospacedDigit()).foregroundColor(.white.opacity(0.65))
+                        .environment(\.layoutDirection, .leftToRight)
+                    if (s.resolved?.count ?? 0) > 1 { Button(action: { s.chosen = nil }) { Text(he("שנה")).font(.system(size: 12)).foregroundColor(amber) }.buttonStyle(.plain) }
+                }
+            } else if let r = s.resolved, r.count > 1 {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(he("מצאתי כמה אנשי קשר בשם \"\(s.resolvedQuery)\". למי לשלוח?")).font(.system(size: 12.5)).foregroundColor(.white.opacity(0.75))
+                    ForEach(r) { c in
+                        Button(action: { s.chosen = c }) {
+                            HStack {
+                                Text(he(c.name)).font(.system(size: 13, weight: .semibold)).foregroundColor(.white)
+                                Spacer()
+                                Text(prettyPhone(c.phone.isEmpty ? c.jid : c.phone)).font(.system(size: 12.5).monospacedDigit()).foregroundColor(.white.opacity(0.6))
+                                    .environment(\.layoutDirection, .leftToRight)
+                            }
+                            .padding(.vertical, 7).padding(.horizontal, 10)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.06)))
+                        }.buttonStyle(.plain)
+                    }
+                }
+            } else if let r = s.resolved, r.isEmpty {
+                Text(he("לא מצאתי איש קשר בשם \(s.resolvedQuery). אפשר לכתוב מספר טלפון.")).font(.system(size: 12.5)).foregroundColor(Color(red: 1, green: 0.45, blue: 0.45))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 struct SendPick: View {
     @ObservedObject var m: CallsModel
     @ObservedObject var s: SendSession
