@@ -2473,7 +2473,7 @@ enum SendKind: String, CaseIterable, Identifiable {
 struct Candidate: Equatable, Identifiable { let name: String, jid: String, phone: String; var id: String { jid } }
 
 final class SendSession: ObservableObject {
-    enum Stage: Equatable { case choose, drafting(String), review, sending, pick([Candidate]), sent(String), failed(String) }
+    enum Stage: Equatable { case choose, drafting(String), review, confirm(Candidate), sending, pick([Candidate]), sent(String), failed(String) }
     let call: CallItem
     @Published var kind: SendKind = .summary
     @Published var recipient: String
@@ -2586,6 +2586,39 @@ final class SendSession: ObservableObject {
         a.append("--no-session-persistence")
         return a
     }
+    // לפני שליחה: מאתרים את איש הקשר (חיפוש בלבד, בלי הרשאת שליחה) ומראים שם + מספר לאישור. כמה התאמות = בחירה
+    func resolveRecipient() {
+        guard case .connected(let server)? = model?.wa else { stage = .failed("וואטסאפ לא מחובר"); return }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pdfPath == nil { stage = .failed("ההודעה ריקה"); return }
+        let digits = recipient.filter(\.isNumber)
+        if digits.count >= 9 && recipient.range(of: "^[+0-9 ()-]+$", options: .regularExpression) != nil {
+            stage = .confirm(Candidate(name: recipient, jid: digits, phone: digits)); return
+        }
+        stage = .drafting("מחפש את \(recipient) באנשי הקשר…")
+        let prompt = """
+        קרא ל-\(server.toolPrefix)search_contacts עם query="\(recipient)" (אם הכלי עוד לא טעון, טען אותו עם ToolSearch). אסור לשלוח שום דבר.
+        החזר שורה אחת של JSON בלבד: {"candidates": [{"name": "...", "jid": "...", "phone": "..."}]} עם כל אנשי הקשר שיכולים להתאים (עד 8), או רשימה ריקה אם אין.
+        """
+        let args = ["-p", "--model", model?.summaryModelID ?? summaryModel, "--permission-mode", "dontAsk",
+                    "--tools", "ToolSearch", "--allowedTools", server.toolPrefix + "search_contacts", "--no-session-persistence"]
+        DispatchQueue.global().async {
+            let r = runClaude(args, input: prompt, timeout: 90)
+            let o = lastJSONObject(r.out, key: "candidates")
+            DispatchQueue.main.async {
+                let cands = (o?["candidates"] as? [[String: Any]] ?? []).compactMap { c -> Candidate? in
+                    guard let j = c["jid"] as? String, !j.isEmpty else { return nil }
+                    let ph = (c["phone"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? j.components(separatedBy: "@").first ?? ""
+                    return Candidate(name: c["name"] as? String ?? j, jid: j, phone: ph)
+                }
+                switch cands.count {
+                case 0: self.stage = .failed(o == nil ? "לא הצלחתי לחפש באנשי הקשר. בדוק שוואטסאפ מחובר" : "לא מצאתי איש קשר בשם \(self.recipient)")
+                case 1: self.stage = .confirm(cands[0])
+                default: self.stage = .pick(cands)
+                }
+            }
+        }
+    }
+
     func send(jid: String? = nil) {
         guard case .connected(let server)? = model?.wa else { stage = .failed("וואטסאפ לא מחובר"); return }
         if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pdfPath == nil { stage = .failed("ההודעה ריקה"); return }
@@ -3164,6 +3197,7 @@ struct SendStageView: View {
         case .review: SendReview(m: m, s: s)
         case .sending: BusyRow(text: "שולח ל-" + s.recipient + "…")
         case .pick(let cands): SendPick(m: m, s: s, cands: cands)
+        case .confirm(let c): SendConfirm(m: m, s: s, c: c)
         case .sent(let to): SendDone(m: m, to: to)
         case .failed(let why): SendFailed(m: m, s: s, why: why)
         }
@@ -3248,10 +3282,42 @@ struct SendReview: View {
             }
             FieldBox(label: "אל:", placeholder: "שם איש הקשר או מספר טלפון", text: $s.recipient)
             HStack(spacing: 10) {
-                PillButton(title: "שלח ל-" + (s.recipient.isEmpty ? "?" : s.recipient), primary: true) { s.send() }
+                PillButton(title: "המשך לשליחה ל-" + (s.recipient.isEmpty ? "?" : s.recipient), primary: true) { s.resolveRecipient() }
                     .disabled(s.recipient.trimmingCharacters(in: .whitespaces).isEmpty)
                 PillButton(title: "נסח מחדש") { s.makeDraft() }
                 PillButton(title: "חזרה") { s.stage = .choose }
+            }
+        }
+    }
+}
+// אישור אחרון: למי בדיוק נשלח (שם + מספר)
+func prettyPhone(_ p: String) -> String {
+    let d = p.filter(\.isNumber)
+    guard d.hasPrefix("972"), d.count == 12 else { return p.components(separatedBy: "@").first ?? p }
+    let local = "0" + d.dropFirst(3)
+    return "\(local.prefix(3))-\(local.dropFirst(3).prefix(3))-\(local.dropFirst(6))"
+}
+struct SendConfirm: View {
+    @ObservedObject var m: CallsModel
+    @ObservedObject var s: SendSession
+    let c: Candidate
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(he("לשלוח את ההודעה ל:")).font(.system(size: 13, weight: .semibold)).foregroundColor(.white.opacity(0.6))
+            HStack(spacing: 12) {
+                Image(systemName: "person.crop.circle.fill").font(.system(size: 28)).foregroundColor(amber)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(he(c.name)).font(.system(size: 16, weight: .semibold)).foregroundColor(.white)
+                    Text(prettyPhone(c.phone.isEmpty ? c.jid : c.phone)).font(.system(size: 14).monospacedDigit())
+                        .foregroundColor(.white.opacity(0.7)).environment(\.layoutDirection, .leftToRight)
+                }
+                Spacer()
+            }
+            .padding(.vertical, 12).padding(.horizontal, 14)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.07)))
+            HStack(spacing: 10) {
+                PillButton(title: "שלח עכשיו", primary: true) { s.recipient = c.name; s.send(jid: c.jid) }
+                PillButton(title: "לא זה, חזרה") { s.stage = .review }
             }
         }
     }
@@ -3264,7 +3330,7 @@ struct SendPick: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(he("מצאתי כמה אנשי קשר בשם \"\(s.recipient)\". למי לשלוח?")).font(.system(size: 14)).foregroundColor(.white.opacity(0.85))
             ForEach(cands) { c in
-                Button(action: { s.recipient = c.name; s.send(jid: c.jid) }) {
+                Button(action: { s.recipient = c.name; s.stage = .confirm(c) }) {
                     HStack {
                         Text(he(c.name)).font(.system(size: 14, weight: .semibold)).foregroundColor(.white)
                         Spacer()
