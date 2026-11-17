@@ -1,5 +1,7 @@
 #!/bin/bash
 # מתקין את טימי, מקליט ומתמלל שיחות בעברית, על מק (Apple Silicon, macOS 15 ומעלה).
+# בודק כל רכיב שצריך, ומוריד רק את מה שחסר. בלי סיסמת מנהל ובלי Homebrew.
+#
 # שימוש:
 #   ./install.sh --name "השם שלך" [--about "תיאור קצר של העסק"] [--people "דנה כהן,אבי לוי"]
 #                [--output-dir "~/Documents/טימי - הקלטות"] [--venv /path/to/existing/venv]
@@ -7,9 +9,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$HOME/Library/Application Support/Timmy"
-# מתקינים בתיקיית היישומים הרגילה (מופיע ב-Launchpad ובחיפוש); אם אין הרשאת כתיבה, בתיקיית היישומים של המשתמש
-if [[ -w /Applications ]]; then APP="/Applications/טימי.app"; else mkdir -p "$HOME/Applications"; APP="$HOME/Applications/טימי.app"; fi
 MODEL="mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx"
+PY_VERSION="3.12"
 
 NAME=""; ABOUT=""; PEOPLE=""; OUTDIR="$HOME/Documents/טימי - הקלטות"; VENV=""
 while [[ $# -gt 0 ]]; do
@@ -24,67 +25,106 @@ while [[ $# -gt 0 ]]; do
 done
 
 step() { echo ""; echo "==> $1"; }
+ok()   { echo "  ✓ $1"; }
+get()  { echo "  ↓ $1"; }
 fail() { echo ""; echo "❌ $1"; exit 1; }
 
+# ---------------------------------------------------------------------------
 step "בודק את המחשב"
-[[ "$(uname -m)" == "arm64" ]] || fail "צריך מק עם שבב Apple (M1 ומעלה). מקים עם אינטל לא נתמכים."
+[[ "$(uname -m)" == "arm64" ]] || fail "צריך מק עם שבב Apple (M1 ומעלה). מקים עם מעבד אינטל לא נתמכים."
 MAJOR=$(sw_vers -productVersion | cut -d. -f1)
-[[ "$MAJOR" -ge 15 ]] || fail "צריך macOS 15 (Sequoia) ומעלה. כרגע: $(sw_vers -productVersion)"
+[[ "$MAJOR" -ge 15 ]] || fail "צריך macOS 15 (Sequoia) ומעלה. כרגע: $(sw_vers -productVersion). עדכון: הגדרות מערכת ← כללי ← עדכון תוכנה."
+ok "מק $(sw_vers -productVersion) עם שבב Apple"
 FREE_GB=$(df -g "$HOME" | awk 'NR==2{print $4}')
-[[ -n "$VENV" || "$FREE_GB" -ge 4 ]] || fail "צריך לפחות 4GB פנויים בדיסק (יש $FREE_GB GB)."
-echo "✓ מק $(sw_vers -productVersion), שבב Apple, $FREE_GB GB פנויים"
-
-step "בודק כלי פיתוח של אפל (בשביל לבנות את האפליקציה)"
-if ! xcode-select -p >/dev/null 2>&1 || ! command -v swiftc >/dev/null; then
-  xcode-select --install || true
-  fail "נפתח חלון התקנה של Command Line Tools. אשר אותו, חכה שיסתיים, ואז הרץ שוב את ההתקנה."
-fi
-echo "✓ swiftc קיים"
-
-step "בודק Homebrew, ffmpeg ו-Python"
-BREW=""
-for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do [[ -x "$b" ]] && BREW="$b" && break; done
-if [[ -z "$BREW" ]]; then
-  fail "צריך Homebrew. התקנה: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" ואז להריץ שוב."
-fi
-BREW_PREFIX="$("$BREW" --prefix)"
-[[ -x "$BREW_PREFIX/bin/ffmpeg" ]] || "$BREW" install ffmpeg
-FFMPEG="$BREW_PREFIX/bin/ffmpeg"
-echo "✓ ffmpeg: $FFMPEG"
+NEED_GB=4
+[[ -d "$HOME/.cache/huggingface/hub/models--${MODEL//\//--}" ]] && NEED_GB=2
+[[ -n "$VENV" ]] && NEED_GB=1
+[[ "$FREE_GB" -ge "$NEED_GB" ]] || fail "צריך לפחות ${NEED_GB}GB פנויים בדיסק (יש ${FREE_GB}GB). פנה מקום והרץ שוב."
+ok "${FREE_GB}GB פנויים בדיסק"
+curl -sfI --max-time 15 https://huggingface.co >/dev/null || fail "אין חיבור לאינטרנט (צריך אותו להורדת מודל העברית). בדוק את החיבור והרץ שוב."
+ok "יש חיבור לאינטרנט"
 
 mkdir -p "$APP_DIR"
+
+# ---------------------------------------------------------------------------
+step "Python ומנוע התמלול"
+UV=""
 if [[ -n "$VENV" ]]; then
   [[ -x "$VENV/bin/python" ]] || fail "לא נמצא python ב-$VENV"
   rm -rf "$APP_DIR/venv"; ln -s "$VENV" "$APP_DIR/venv"
-  echo "✓ משתמש בסביבת פייתון קיימת: $VENV"
+  ok "משתמש בסביבת Python קיימת: $VENV"
 else
-  PY=""
-  for v in 3.12 3.11; do [[ -x "$BREW_PREFIX/bin/python$v" ]] && PY="$BREW_PREFIX/bin/python$v" && break; done
-  if [[ -z "$PY" ]]; then "$BREW" install python@3.12; PY="$BREW_PREFIX/bin/python3.12"; fi
-  if [[ ! -x "$APP_DIR/venv/bin/python" ]]; then
-    "$PY" -m venv "$APP_DIR/venv"
+  # uv: מתקין Python ומנהל חבילות, לתוך תיקיית המשתמש, בלי סיסמה
+  UV="$(command -v uv || true)"
+  [[ -z "$UV" && -x "$HOME/.local/bin/uv" ]] && UV="$HOME/.local/bin/uv"
+  if [[ -z "$UV" ]]; then
+    get "מוריד את uv (מנהל Python קטן, בערך 20MB)"
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1 \
+      || fail "ההורדה של uv נכשלה. בדוק אינטרנט והרץ שוב."
+    UV="$HOME/.local/bin/uv"
+    [[ -x "$UV" ]] || fail "uv לא הותקן כמו שצריך."
   fi
-  step "מתקין את מנוע התמלול (mlx-whisper)"
-  "$APP_DIR/venv/bin/pip" install --quiet --upgrade pip
-  "$APP_DIR/venv/bin/pip" install --quiet "mlx-whisper==0.4.3" numpy
-  echo "✓ mlx-whisper מותקן"
+  ok "uv: $UV"
+  if [[ -x "$APP_DIR/venv/bin/python" ]] && "$APP_DIR/venv/bin/python" -c "import mlx_whisper, numpy" 2>/dev/null; then
+    ok "מנוע התמלול כבר מותקן"
+  else
+    get "מכין Python $PY_VERSION (אם אין במחשב, uv מוריד אותו)"
+    rm -rf "$APP_DIR/venv"
+    "$UV" venv --quiet --python "$PY_VERSION" "$APP_DIR/venv" || fail "יצירת סביבת Python נכשלה."
+    get "מתקין את מנוע התמלול mlx-whisper (בערך 300MB)"
+    "$UV" pip install --quiet --python "$APP_DIR/venv/bin/python" "mlx-whisper==0.4.3" numpy \
+      || fail "ההתקנה של מנוע התמלול נכשלה. הרץ שוב (ההורדה ממשיכה)."
+    ok "מנוע התמלול מותקן"
+  fi
 fi
+"$APP_DIR/venv/bin/python" -c "import mlx_whisper, numpy, huggingface_hub" 2>/dev/null || fail "מנוע התמלול לא נטען. הרץ שוב את ההתקנה."
 
-step "מוריד את מודל העברית של ivrit.ai (בערך 1.6GB, פעם אחת בלבד)"
+# ---------------------------------------------------------------------------
+step "ffmpeg (לשמירת ההקלטה כ-mp3)"
+FFMPEG=""
+for f in "$(command -v ffmpeg || true)" /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg; do
+  [[ -n "$f" && -x "$f" ]] && FFMPEG="$f" && break
+done
+if [[ -n "${TIMMY_TEST_NO_FFMPEG:-}" ]]; then FFMPEG=""; fi   # לבדיקות: מדמה מחשב בלי ffmpeg
+if [[ -z "$FFMPEG" ]]; then
+  if ! "$APP_DIR/venv/bin/python" -c "import imageio_ffmpeg" 2>/dev/null; then
+    get "מוריד ffmpeg (בערך 30MB)"
+    if [[ -n "$UV" ]]; then "$UV" pip install --quiet --python "$APP_DIR/venv/bin/python" imageio-ffmpeg
+    else "$APP_DIR/venv/bin/python" -m pip install --quiet imageio-ffmpeg; fi
+  fi
+  FFMPEG="$("$APP_DIR/venv/bin/python" -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")"
+fi
+[[ -x "$FFMPEG" ]] || fail "ffmpeg לא נמצא ולא הותקן."
+ok "ffmpeg: $FFMPEG"
+
+# ---------------------------------------------------------------------------
+step "מודל העברית של ivrit.ai (בערך 1.6GB, פעם אחת בלבד)"
 MODEL_CACHE="$HOME/.cache/huggingface/hub/models--${MODEL//\//--}"
-[[ -d "$MODEL_CACHE" ]] || touch "$APP_DIR/.model_downloaded_by_timmy"   # רק אז ההסרה תמחק את המודל
-"$APP_DIR/venv/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('$MODEL')" \
-  || fail "הורדת המודל נכשלה. בדוק חיבור לאינטרנט והרץ שוב."
-echo "✓ המודל מוכן"
+if [[ -d "$MODEL_CACHE" ]]; then
+  ok "המודל כבר במחשב, בודק שהוא שלם"
+else
+  touch "$APP_DIR/.model_downloaded_by_timmy"   # רק אז ההסרה תמחק את המודל
+  get "מוריד את המודל, זה החלק הארוך"
+fi
+"$APP_DIR/venv/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('$MODEL')" >/dev/null 2>&1 \
+  || fail "הורדת המודל נכשלה. בדוק חיבור לאינטרנט והרץ שוב (ההורדה ממשיכה מאיפה שעצרה)."
+ok "המודל מוכן"
 
-step "מעתיק את קבצי המקליט"
-cp "$HERE/live.py" "$APP_DIR/live.py"
-
-step "שומר הגדרות"
+# ---------------------------------------------------------------------------
+step "Claude Code (בשביל הסיכומים והנקודות)"
 CLAUDE_PATH="$(command -v claude || true)"
 for c in "$HOME/.claude/local/claude" "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
   [[ -z "$CLAUDE_PATH" && -x "$c" ]] && CLAUDE_PATH="$c"
 done
+if [[ -z "$CLAUDE_PATH" ]]; then
+  for c in "$HOME"/.nvm/versions/node/*/bin/claude; do [[ -x "$c" ]] && CLAUDE_PATH="$c"; done
+fi
+if [[ -n "$CLAUDE_PATH" ]]; then ok "Claude Code: $CLAUDE_PATH"
+else echo "  ! Claude Code לא נמצא. טימי יתמלל, אבל בלי סיכומים ונקודות."; fi
+
+# ---------------------------------------------------------------------------
+step "מעתיק את קבצי טימי ושומר הגדרות"
+cp "$HERE/live.py" "$APP_DIR/live.py"
 mkdir -p "${OUTDIR/#\~/$HOME}"
 NAME="$NAME" ABOUT="$ABOUT" PEOPLE="$PEOPLE" OUTDIR="$OUTDIR" CLAUDE_PATH="$CLAUDE_PATH" FFMPEG="$FFMPEG" \
 CFG="$APP_DIR/config.json" "$APP_DIR/venv/bin/python" - <<'PY'
@@ -92,7 +132,7 @@ import json, os
 p = os.environ["CFG"]
 cfg = {}
 if os.path.exists(p):
-    try: cfg = json.load(open(p, encoding="utf-8"))
+    try: cfg = json.load(open(p, encoding="utf-8-sig"))
     except Exception: cfg = {}
 def setv(k, v):
     if v: cfg[k] = v
@@ -106,22 +146,34 @@ if os.environ["PEOPLE"].strip():
 cfg.setdefault("owner_name", "אני"); cfg.setdefault("people", [])
 cfg.setdefault("clients_dir", ""); cfg.setdefault("meetings_dir", "")
 json.dump(cfg, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-print("✓ הגדרות נשמרו:", p)
-print("  שם:", cfg["owner_name"], "| תיקייה:", cfg.get("output_dir"), "| Claude:", cfg.get("claude_path") or "לא נמצא (יהיה רק תמלול, בלי סיכום)")
+print("  ✓ שם:", cfg["owner_name"], "| תיקייה:", cfg.get("output_dir"))
 PY
 
-step "בונה את האפליקציה"
+# ---------------------------------------------------------------------------
+step "מתקין את האפליקציה"
+# תיקיית היישומים הרגילה (מופיע ב-Launchpad ובחיפוש); אם אין הרשאת כתיבה, תיקיית היישומים של המשתמש
+if [[ -w /Applications ]]; then APP="/Applications/טימי.app"; else mkdir -p "$HOME/Applications"; APP="$HOME/Applications/טימי.app"; fi
 pkill -f "טימי.app/Contents/MacOS/CallRecorder" 2>/dev/null || true
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# בונים מהקוד אם יש כלי פיתוח של אפל; אחרת משתמשים בגרסה המוכנה מהריפו (לא צריך Xcode)
+if [[ -z "${TIMMY_TEST_NO_SWIFTC:-}" ]] && xcode-select -p >/dev/null 2>&1 && command -v swiftc >/dev/null 2>&1 \
+   && swiftc -O -target arm64-apple-macos15.0 "$HERE/Recorder.swift" -o "$APP/Contents/MacOS/CallRecorder" 2>/dev/null; then
+  ok "נבנה מהקוד"
+else
+  cp "$HERE/bin/CallRecorder" "$APP/Contents/MacOS/CallRecorder"
+  chmod +x "$APP/Contents/MacOS/CallRecorder"
+  ok "גרסה מוכנה (בלי צורך בכלי פיתוח)"
+fi
 cp "$HERE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$HERE/timmy.png" "$APP/Contents/Resources/timmy.png"
-swiftc -O "$HERE/Recorder.swift" -o "$APP/Contents/MacOS/CallRecorder" 2>&1 | grep -E "error" && fail "הבנייה נכשלה"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.timmy.recorder</string>
 <key>CFBundleName</key><string>טימי</string>
+<key>CFBundleDisplayName</key><string>טימי</string>
 <key>CFBundleExecutable</key><string>CallRecorder</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -132,13 +184,18 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSMicrophoneUsageDescription</key><string>כדי להקליט גם את הקול שלך בשיחה</string>
 </dict></plist>
 PLIST
-codesign --force --deep -s - "$APP" >/dev/null 2>&1
-echo "✓ האפליקציה מותקנת: $APP"
+xattr -cr "$APP" 2>/dev/null || true
+codesign --force --deep -s - "$APP" >/dev/null 2>&1 || fail "חתימת האפליקציה נכשלה."
+ok "מותקן: $APP"
 
-step "מפעיל"
-open "$APP"
+# ---------------------------------------------------------------------------
+step "בדיקה אחרונה"
+"$APP_DIR/venv/bin/python" -c "import ast; ast.parse(open('$APP_DIR/live.py').read())" || fail "קובץ המנוע פגום."
+[[ -x "$APP/Contents/MacOS/CallRecorder" ]] || fail "האפליקציה לא הותקנה."
+ok "הכל מוכן"
+
+[[ -n "${TIMMY_TEST_NO_OPEN:-}" ]] || open "$APP"
 echo ""
 echo "✅ ההתקנה הסתיימה."
-echo "   טימי נפתח עכשיו עם חלון הגדרה קצר שמסדר את ההרשאות (קול של כרום + מיקרופון)."
+echo "   טימי נפתח עכשיו עם חלון הגדרה קצר: הרשאות (קול של כרום + מיקרופון) ובחירת תיקייה."
 echo "   אחר כך הוא מחכה למעלה באמצע המסך, ליד הנוטש. לחיצה = התחלת הקלטה."
-echo "   ההקלטות והסיכומים נשמרים ב: $OUTDIR"

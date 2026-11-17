@@ -183,7 +183,10 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
                 let sp = o["speaker"] as? String ?? "other"
                 let t = o["text"] as? String ?? ""
                 if !t.isEmpty { partial = t; partialSpeaker = sp; thinking = false }
-                else if (o["thinking"] as? Bool) == true { partial = ""; partialSpeaker = sp; thinking = true }
+                else if (o["thinking"] as? Bool) == true {
+                    // לא דורסים טקסט חי של הדובר השני (רעש במיק לא מחליף את מה שהצד השני אומר)
+                    if partial.isEmpty || partialSpeaker == sp { partial = ""; partialSpeaker = sp; thinking = true }
+                }
                 else if sp == partialSpeaker { partial = ""; thinking = false }
             case "final":
                 let sp = o["speaker"] as? String ?? "other"

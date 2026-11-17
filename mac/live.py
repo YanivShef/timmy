@@ -67,10 +67,15 @@ emit({"type": "loading"})
 import mlx_whisper
 MODEL = "mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx"
 import re as _re
-FILLERS = {"אה", "אהה", "אממ", "אמ", "הממ", "ממ", "אוקיי", "אין", "נו"}
+# מילות מילוי שתמיד נזרקות כשהן כל השורה ("אין" ו"אוקיי" הן תשובות אמיתיות, לא כאן)
+FILLERS = {"אה", "אהה", "אממ", "אמ", "הממ", "ממ", "נו"}
+# משפטי "מלאי" ש-Whisper ממציא על מוזיקה/רעש/שקט
+STOCK = {"תודה רבה", "בבקשה", "סליחה", "תודה שצפיתם", "כתוביות", "תודה", "אוקיי"}
+NEVER = ("היושב ראש", "היושב-ראש", "חברי הכנסת", "תודה שצפיתם", "כתוביות")
+BIDI = _re.compile("[‎‏‪-‮⁦-⁩]")
 def _norm(w): return _re.sub(r"[^\w]", "", w)
 def dedupe(t):
-    # לולאות חזרה של Whisper: מילה שחוזרת 3+ פעמים ברצף, צמד מילים 3+ פעמים, או ביטוי של 3+ מילים פעמיים ברצף -> נשאר פעם אחת
+    # לולאות חזרה של Whisper בתוך שורה: מילה/צמד 3+ פעמים ברצף, או ביטוי של 3+ מילים פעמיים -> נשאר פעם אחת (עם הפיסוק של העותק האחרון)
     words = t.split(); changed = False
     for n in list(range(1, 9)) + list(range(1, 9)):
         min_rep = 2 if n >= 3 else 3
@@ -82,24 +87,44 @@ def dedupe(t):
                 while i + n * (k + 1) <= len(words) and [_norm(w) for w in words[i + n * k:i + n * (k + 1)]] == gram and any(gram):
                     k += 1
                 if k >= min_rep:
-                    out += words[i:i + n]; i += n * k; changed = True; continue
+                    out += words[i + n * (k - 1):i + n * k]; i += n * k; changed = True; continue
             out.append(words[i]); i += 1
         words = out
     return " ".join(words), changed
 def clean(t):
+    t = BIDI.sub("", t).strip()
     t, changed = dedupe(t)
     core = [w for w in (_norm(x) for x in t.split()) if w]
     if not core or all(w in FILLERS for w in core): return "", changed
     return t, changed
 def tr(a, partial=False):
-    """מחזיר (טקסט, אמין). טקסט לא אמין בתמלול ביניים לא מוצג; במקומו אנימציית 'מתמלל'."""
-    r = mlx_whisper.transcribe(a, path_or_hf_repo=MODEL, language="he", condition_on_previous_text=False, verbose=None)
-    raw = [s for s in r["segments"] if s.get("no_speech_prob", 0) < 0.6]
+    """מחזיר (טקסט, אמין, פרטים). בתמלול ביניים טקסט לא אמין לא מוצג (במקומו 'מתמלל');
+    בשורה סופית פרטים משמשים לסינון הזיות (final_ok)."""
+    kw = {"temperature": (0.0,)} if partial else {}   # בתמלול ביניים בלי ניסיונות חוזרים בטמפרטורה גבוהה (נתקע על מוזיקה)
+    r = mlx_whisper.transcribe(a, path_or_hf_repo=MODEL, language="he", condition_on_previous_text=False, verbose=None, **kw)
+    raw = r["segments"]
     segs = [s for s in raw if s.get("avg_logprob", 0) > -1.0 and s.get("compression_ratio", 1) < 2.4]
     text, changed = clean(" ".join(s["text"].strip() for s in segs).strip())
-    reliable = bool(text) and not changed and len(segs) == len(raw) and all(
-        s.get("compression_ratio", 1) < 2.0 and s.get("avg_logprob", 0) > -0.8 for s in segs)
-    return text, reliable
+    nwords = len(text.split())
+    cr_max = 2.0 if nwords < 20 else 2.35
+    info = {"changed": changed,
+            "min_lp": min([s.get("avg_logprob", 0) for s in segs], default=0.0),
+            "max_temp": max([s.get("temperature", 0) for s in segs], default=0.0)}
+    reliable = bool(text) and not changed and len(segs) == len(raw) and info["max_temp"] == 0 and all(
+        s.get("compression_ratio", 1) < cr_max and s.get("avg_logprob", 0) > -0.8 for s in segs)
+    if reliable and not final_ok(text, info, partial=True): reliable = False
+    return text, reliable, info
+def final_ok(text, info, partial=False):
+    """שורה סופית: זורקים הזיות טיפוסיות של Whisper על רעש/מוזיקה."""
+    if not text: return False
+    core = " ".join(w for w in (_norm(x) for x in text.split()) if w)
+    if any(n in text for n in NEVER): return False
+    if not partial and info["max_temp"] >= 0.4: return False
+    n = len(core.split())
+    if n <= 3 and info["min_lp"] <= -0.7: return False
+    if info["changed"] and info["min_lp"] < -0.5: return False
+    if core in STOCK and info["min_lp"] < -0.5: return False
+    return True
 tr(np.zeros(SR, np.float32)); emit({"type": "ready"})
 
 FR = 1600; TH = {0: 0.006, 1: 0.01}
@@ -204,7 +229,12 @@ class Chan:
         self.speaking = False
         if self.ch == 1 and echo_score(a, at) > 0.6:
             emit({"type": "partial", "text": "", "speaker": "me"}); return
-        t, _ = tr(a); sec = at / SR
+        t, _, info = tr(a); sec = at / SR
+        if t and not final_ok(t, info): t = ""
+        if t and len(t.split()) <= 3:
+            key = " ".join(_norm(w) for w in t.split())
+            if any(spk == self.ch and sec - t0 < 30 and " ".join(_norm(w) for w in tx.split()) == key for (t0, spk, tx) in entries[-6:]):
+                t = ""   # אותה שורה קצרה שוב ושוב = הזיה
         if t and not (self.ch == 1 and is_echo(t, sec)):
             entries.append((sec, self.ch, t)); finals.append(f"{NAMES[self.ch]}: {t}")
             txt.write(f"[{ts(sec)}] {NAMES[self.ch]}: {t}\n"); txt.flush()
@@ -235,7 +265,7 @@ class Chan:
         elif time.time() - self.last_partial >= 1.2 and dur >= 0.8:
             if self.ch == 1 and echo_score(self.pending, self.start) > 0.6:
                 self.last_partial = time.time(); return
-            t, ok = tr(self.pending, partial=True)
+            t, ok, _ = tr(self.pending, partial=True)
             sp = "me" if self.ch == 1 else "other"
             if ok: emit({"type": "partial", "text": t, "speaker": sp})
             else: emit({"type": "partial", "text": "", "thinking": True, "speaker": sp})
