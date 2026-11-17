@@ -947,7 +947,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openImprove() {
         improve.reload()
         if improveWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 720),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 820),
                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
@@ -1108,16 +1108,19 @@ final class ImproveModel: ObservableObject {
 struct ImproveView: View {
     @ObservedObject var m: ImproveModel
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                if let img = resImage("timmy") { Image(nsImage: img).resizable().frame(width: 44, height: 44) }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("שפר את טימי").font(.system(size: 22, weight: .bold)).foregroundColor(.white)
-                    Text("תגיד לי מה לשנות בנקודות ובסיכומים. אזכור את זה לכל השיחות הבאות.")
-                        .font(.system(size: 13)).foregroundColor(.white.opacity(0.6))
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(spacing: 14) {
+                if let img = resImage("timmy") {
+                    Image(nsImage: img).resizable().interpolation(.high).frame(width: 58, height: 58)
+                        .shadow(color: amber.opacity(0.35), radius: 12)
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(he("שפר את טימי")).font(.system(size: 24, weight: .bold)).foregroundColor(.white)
+                    Text(he("תגיד לי מה לשנות בנקודות, בסיכומים או במראה.\nאזכור את זה לכל השיחות הבאות."))
+                        .font(.system(size: 13)).foregroundColor(.white.opacity(0.6)).lineSpacing(3)
                 }
             }
-            .padding(.top, 26)
+            .padding(.top, 48)
 
             // שדה כתיבה
             HStack(spacing: 8) {
@@ -1134,15 +1137,17 @@ struct ImproveView: View {
 
             // דוגמאות
             Text("רעיונות").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
-            FlowChips(items: m.examples.filter { !m.items.contains($0) }) { m.add($0) }
+            FlowChips(items: Array(m.examples.filter { !m.items.contains($0) }.prefix(6))) { m.add($0) }
 
             AppearanceRow(m: m)
 
             InstructionsList(m: m).frame(maxHeight: .infinity)
 
             ImproveFooter(m: m)
-        .padding(.horizontal, 28).padding(.bottom, 24)
-        .frame(width: 560, height: 720)
+            HStack { Spacer(); CreatorBadge(); Spacer() }
+        }
+        .padding(.horizontal, 36).padding(.bottom, 26)
+        .frame(width: 620, height: 820)
         .background(bgColor)
         .environment(\.layoutDirection, .rightToLeft)
     }
@@ -1233,7 +1238,6 @@ struct ImproveFooter: View {
                 }
             }
         }
-        }
     }
 }
 
@@ -1241,9 +1245,9 @@ struct ImproveFooter: View {
 struct FlowChips: View {
     let items: [String]; let tap: (String) -> Void
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(stride(from: 0, to: items.count, by: 2)), id: \.self) { i in
-                HStack(spacing: 6) {
+                HStack(spacing: 10) {
                     ForEach(items[i..<min(i + 2, items.count)], id: \.self) { t in
                         Button(action: { tap(t) }) {
                             Text("+ " + t).font(.system(size: 12)).foregroundColor(.white.opacity(0.8)).lineLimit(1)
@@ -1254,6 +1258,29 @@ struct FlowChips: View {
                 }
             }
         }
+    }
+}
+
+// תג היוצר: תמונה + "@yaniv_shef", לינק לאינסטגרם
+struct CreatorBadge: View {
+    var label = "נבנה על ידי"
+    var body: some View {
+        Button(action: { NSWorkspace.shared.open(URL(string: "https://www.instagram.com/yaniv_shef/")!) }) {
+            HStack(spacing: 8) {
+                if let img = resImage("creator") {
+                    Image(nsImage: img).resizable().interpolation(.high).scaledToFill()
+                        .frame(width: 26, height: 26).clipShape(Circle())
+                        .overlay(Circle().stroke(amber.opacity(0.7), lineWidth: 1.2))
+                }
+                Text(he(label)).font(.system(size: 12, weight: .medium))
+                Text("@yaniv_shef").font(.system(size: 12, weight: .semibold)).environment(\.layoutDirection, .leftToRight)
+            }
+            .foregroundColor(amber.opacity(0.9))
+            .padding(.vertical, 5).padding(.leading, 6).padding(.trailing, 14)
+            .background(Capsule().stroke(amber.opacity(0.35), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
     }
 }
 
