@@ -1,0 +1,2 @@
+#!/bin/bash
+cat > "/Users/yaniv/Projects/timmy/qa-improve/tee/dump-$(date +%s%N).in"; printf "%s\n" "# dumped" "תמלול מלא: z"

@@ -1,0 +1,15 @@
+== C_fenced  (0s) rc=0 stdout={"type": "restyled", "txt": "/Users/yaniv/Projects/timmy/qa-improve/runs/C_fenced/out/2026-11-10 14-30 דני - תמחור אתר.md", "changed": true} stderr=
+title ok: True | # כותרת מגודרת
+date line exact: False
+transcript line exact: False | last nonempty is transcript line: False
+em dash present: False
+changed: True
+----- NEW -----
+# כותרת מגודרת
+
+**תאריך:** X
+
+גוף
+
+תמלול מלא: t.txt
+

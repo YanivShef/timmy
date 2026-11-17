@@ -1,0 +1,10 @@
+== C_stub  (0s) rc=0 stdout={"type": "restyled", "txt": "/Users/yaniv/Projects/timmy/qa-improve/runs/C_stub/out/2026-11-10 14-30 דני - תמחור אתר.md", "changed": true} stderr=
+title ok: True | # x
+date line exact: False
+transcript line exact: False | last nonempty is transcript line: False
+em dash present: False
+changed: True
+----- NEW -----
+# x
+תמלול מלא:
+

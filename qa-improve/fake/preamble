@@ -1,0 +1,2 @@
+#!/bin/bash
+cat > /dev/null; printf "%s\n" "הנה המסמך המעודכן:" "" "# כותרת" "תמלול מלא: t.txt"

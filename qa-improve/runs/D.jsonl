@@ -1,0 +1,51 @@
+{"type": "loading"}
+{"type": "ready"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "me"}
+{"type": "partial", "text": "היי דני, מה שלומך? בוא נדבר על האתר לחנות.", "speaker": "me"}
+{"type": "final", "text": "היי דני, מה שלומך? בוא נדבר על האתר לחנות.", "t": "00:00:00", "speaker": "me"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "other"}
+{"type": "partial", "text": "שלום ינין.", "speaker": "other"}
+{"type": "partial", "text": "שלום יניב, יש לי חנות פרחים ב...", "speaker": "other"}
+{"type": "partial", "text": "שלום יניב, יש לי חנות פרחים בחולון כבר שמונה שנים ועשר שנים.", "speaker": "other"}
+{"type": "partial", "text": "שלום יניב, יש לי חנות פרחים בחולון כבר שמונה שנים ואין לי יותר בכלל.", "speaker": "other"}
+{"type": "final", "text": "שלום יניב, יש לי חנות פרחים בחולון כבר שמונה שנים ואין לי יותר בכלל.", "t": "00:00:04", "speaker": "other"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "me"}
+{"type": "partial", "text": "מה הכי חשוב?", "speaker": "me"}
+{"type": "partial", "text": "מה הכי חשוב לך שיהיה באתר?", "speaker": "me"}
+{"type": "final", "text": "מה הכי חשוב לך שיהיה באתר?", "t": "00:00:10", "speaker": "me"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "other"}
+{"type": "partial", "text": "שאנשים", "speaker": "other"}
+{"type": "partial", "text": "שאנשים יוכלו להזמין זר אונליין.", "speaker": "other"}
+{"type": "partial", "text": "שאנשים יוכלו להזמין זר אונליין ושזה ישלח לי הודעה בבתי.", "speaker": "other"}
+{"type": "final", "text": "שאנשים יוכלו להזמין זר אונליין ושזה ישלח לי הודעה בבת סאף.", "t": "00:00:13", "speaker": "other"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "me"}
+{"type": "partial", "text": "מעולה.", "speaker": "me"}
+{"type": "partial", "text": "מעולה, אתר כזה עם הזמנות וחיבור.", "speaker": "me"}
+{"type": "partial", "text": "מעולה, אתר כזה עם הזמנות וחיבור ל-ובצעה פולה שש אלה.", "speaker": "me"}
+{"type": "partial", "text": "מעולה, אתר כזה עם הזמנות וחיבור ל-vvvצעה פולה 6500 שקל.", "speaker": "me"}
+{"type": "final", "text": "מעולה, אתר כזה עם הזמנות וחיבור ל-vvvצעה פולה 6500 שקל.", "t": "00:00:18", "speaker": "me"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "other"}
+{"type": "bullets", "items": ["🛒 שיחה על אתר לחנות פרחים", "🌸 דני: חנות פרחים בחולון, שמונה שנים", "❓ יניב שואל: מה הכי חשוב באתר"]}
+{"type": "partial", "text": "זה הרבה בב...", "speaker": "other"}
+{"type": "partial", "text": "זה הרבה בבת אחת, אפשר לפרוס ל...", "speaker": "other"}
+{"type": "partial", "text": "זה הרבה בבת אחת, אפשר לפרוס לי שלושה תשלומים.", "speaker": "other"}
+{"type": "final", "text": "זה הרבה בבת אחת, אפשר לפרוס לי שלושה תשלומים.", "t": "00:00:25", "speaker": "other"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "me"}
+{"type": "partial", "text": "כן.", "speaker": "me"}
+{"type": "partial", "text": "כן, שלושה תשלומים זה בסדר.", "speaker": "me"}
+{"type": "partial", "text": "כן, שלושה תשלומים זה בסדר גמור. האתר יהיה מוכן.", "speaker": "me"}
+{"type": "partial", "text": "כן, שלושה תשלומים זה בסדר גמור. האתר יהיה מוכן עד סוף דצמבר.", "speaker": "me"}
+{"type": "final", "text": "כן, שלושה תשלומים זה בסדר גמור. האתר יהיה מוכן עד סוף דצמבר.", "t": "00:00:29", "speaker": "me"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "other"}
+{"type": "partial", "text": "סגור.", "speaker": "other"}
+{"type": "partial", "text": "סגור. אני אשלח לך תמונות של זרקות.", "speaker": "other"}
+{"type": "final", "text": "סגור. אני אשלח לך תמונות של זרים עד יום חמישי.", "t": "00:00:36", "speaker": "other"}
+{"type": "partial", "text": "", "thinking": true, "speaker": "me"}
+{"type": "partial", "text": "ואני אשלח לך.", "speaker": "me"}
+{"type": "partial", "text": "ואני אשלח לך מחר הצעת מחיר מסוימת.", "speaker": "me"}
+{"type": "partial", "text": "ואני אשלח לך מחר הצעת מחיר מסודרת. תודה דני.", "speaker": "me"}
+{"type": "final", "text": "ואני אשלח לך מחר הצעת מחיר מסודרת. תודה דני.", "t": "00:00:40", "speaker": "me"}
+{"type": "saving"}
+{"type": "bullets", "items": ["🛒 שיחה על אתר לחנות פרחים", "🌸 דני: חנות פרחים בחולון, שמונה שנים", "💐 הזמנת זרים אונליין, הודעה לדני", "💰 אתר עם הזמנות: 6500 שקל", "💳 שלושה תשלומים מוסכמים", "📅 האתר יהיה מוכן עד סוף דצמבר", "🖼️ דני: תמונות זרים עד יום חמישי", "📄 יניב: הצעת מחיר מסודרת מחר"]}
+{"type": "saving"}
+{"type": "done", "txt": "/Users/yaniv/Projects/timmy/qa-improve/out/2026-11-17 21-40 דני כהן - אתר הזמנות אונליין לחנות פרחים.md", "title": "אתר הזמנות אונליין לחנות פרחים"}

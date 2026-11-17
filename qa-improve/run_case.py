@@ -1,6 +1,7 @@
 # usage: run_case.py <name> <case-stem> <instructions-json> [claude_path]
 import sys, json, os, shutil, subprocess, time
 Q = "/Users/yaniv/Projects/timmy/qa-improve"
+CASES = Q + "/" + os.environ.get("CASES", "cases")
 name, stem, instr = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
 claude = sys.argv[4] if len(sys.argv) > 4 else os.path.expanduser("~/.nvm/versions/node/v22.12.0/bin/claude")
 app = f"{Q}/runs/{name}/appdir"; out = f"{Q}/runs/{name}/out"
@@ -9,7 +10,7 @@ shutil.copy(f"{Q}/appdir/live.py", app)
 if not os.path.exists(app + "/venv"): os.symlink(os.path.expanduser("~/.venvs/mlx-whisper"), app + "/venv")
 json.dump({"owner_name": "יניב", "claude_path": claude, "output_dir": out, "custom_instructions": instr}, open(app + "/config.json", "w"), ensure_ascii=False)
 for suf in (".md", " - תמלול.txt"):
-    if os.path.exists(f"{Q}/cases/{stem}{suf}"): shutil.copy(f"{Q}/cases/{stem}{suf}", out)
+    if os.path.exists(f"{CASES}/{stem}{suf}"): shutil.copy(f"{CASES}/{stem}{suf}", out)
 md = f"{out}/{stem}.md"; orig = open(md, encoding="utf-8").read()
 t = time.time()
 r = subprocess.run([f"{app}/venv/bin/python", f"{app}/live.py", "--restyle", md], capture_output=True, text=True, env={**os.environ, "TIMMY_APP_DIR": app})

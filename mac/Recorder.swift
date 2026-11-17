@@ -325,10 +325,34 @@ let recRed = Color(red: 1.0, green: 0.27, blue: 0.27)
 let defaultAccent = "#FFA046"
 final class Theme {
     static var accentHex: String = (loadConfig()["accent_color"] as? String) ?? defaultAccent
-    static func set(_ hex: String?) {
-        accentHex = hex ?? defaultAccent
-        saveConfig(["accent_color": accentHex])
+    static var eyeHex: String = (loadConfig()["eye_color"] as? String) ?? ""          // ריק = כמו צבע ההדגשה
+    static var bgHex: String = (loadConfig()["background_color"] as? String) ?? "#000000"
+    static var animations: Bool = (loadConfig()["animations"] as? Bool) ?? true
+    static var version = 0
+    static var isDefault: Bool { accentHex == defaultAccent && eyeHex.isEmpty && bgHex == "#000000" && animations }
+    static func set(_ hex: String?) { apply(["accent_color": hex ?? defaultAccent]) }
+    // מחיל שינויי מראה: accent_color / eye_color / background_color / animations / reset
+    static func apply(_ c: [String: Any]) {
+        if c["reset"] as? Bool == true {
+            accentHex = defaultAccent; eyeHex = ""; bgHex = "#000000"; animations = true
+        }
+        if let v = c["accent_color"] as? String { accentHex = v }
+        if let v = c["eye_color"] as? String { eyeHex = v }
+        if let v = c["background_color"] as? String { bgHex = readableBackground(v) }
+        if let v = c["animations"] as? Bool { animations = v }
+        version += 1
+        saveConfig(["accent_color": accentHex, "eye_color": eyeHex, "background_color": bgHex, "animations": animations])
         NotificationCenter.default.post(name: Notification.Name("timmy.themeChanged"), object: nil)
+    }
+    // רקע בהיר מדי -> מכהים אותו, כדי שהטקסט הלבן יישאר קריא
+    static func readableBackground(_ hex: String) -> String {
+        var h = hex.replacingOccurrences(of: "#", with: "")
+        if h.count == 3 { h = h.map { "\($0)\($0)" }.joined() }
+        guard h.count == 6, let v = UInt32(h, radix: 16) else { return "#000000" }
+        var r = Double((v >> 16) & 0xFF), g = Double((v >> 8) & 0xFF), b = Double(v & 0xFF)
+        let lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+        if lum > 0.22 { let f = 0.22 / lum; r *= f; g *= f; b *= f }
+        return String(format: "#%02X%02X%02X", Int(r), Int(g), Int(b))
     }
 }
 func colorFromHex(_ hex: String) -> Color {
@@ -338,6 +362,9 @@ func colorFromHex(_ hex: String) -> Color {
     return Color(red: Double((v >> 16) & 0xFF) / 255, green: Double((v >> 8) & 0xFF) / 255, blue: Double(v & 0xFF) / 255)
 }
 var amber: Color { colorFromHex(Theme.accentHex) }
+var eyeColor: Color { colorFromHex(Theme.eyeHex.isEmpty ? Theme.accentHex : Theme.eyeHex) }
+var bgColor: Color { colorFromHex(Theme.bgHex) }
+var animOn: Bool { Theme.animations }
 
 // זיהוי הוראת צבע ("תחליף לצבע כחול", "#1E90FF", "תחזיר לכתום"). מחזיר hex, או "reset", או nil אם זו לא הוראת צבע
 let colorNames: [(String, String)] = [
@@ -347,17 +374,38 @@ let colorNames: [(String, String)] = [
     ("ורוד", "#EC4899"), ("סגול", "#A855F7"), ("לילך", "#C4B5FD"), ("לבן", "#F5F5F5"), ("אפור", "#9CA3AF"),
     ("blue", "#3B82F6"), ("green", "#22C55E"), ("purple", "#A855F7"), ("pink", "#EC4899"), ("red", "#EF4444"),
     ("yellow", "#FACC15"), ("teal", "#14B8A6"), ("gold", "#D4AF37")]
-func isColorInstruction(_ t: String) -> Bool {
+func isAppearanceInstruction(_ t: String) -> Bool {
     let l = t.lowercased()
-    return l.contains("צבע") || l.contains("color") || l.contains("colour") || l.range(of: "#[0-9a-f]{3,6}", options: .regularExpression) != nil
+    let keys = ["צבע", "רקע", "עיניים", "עין", "אנימצי", "הנפש", "מצמ", "תזוז", "מראה", "color", "background", "eyes", "animation"]
+    return keys.contains { l.contains($0) } || l.range(of: "#[0-9a-f]{3,6}", options: .regularExpression) != nil
+}
+func isColorInstruction(_ t: String) -> Bool { isAppearanceInstruction(t) }
+// מפענח הוראת מראה בלי Claude. מחזיר שינויים, או nil אם צריך את Claude (ניסוח יצירתי)
+func parseAppearance(_ t: String) -> [String: Any]? {
+    let l = t.lowercased()
+    let has = { (ws: [String]) in ws.contains { l.contains($0) } }
+    if has(["אפס", "תאפס", "ברירת מחדל", "כמו שהיה", "תחזיר הכל", "reset"]) && has(["מראה", "הכל", "צבעים", "עיצוב", "reset"]) { return ["reset": true] }
+    var out: [String: Any] = [:]
+    if has(["אנימצי", "הנפש", "מצמ", "תזוז", "animation"]) {
+        if has(["תוריד", "בלי", "תכבה", "תבטל", "תעצור", "off"]) { out["animations"] = false }
+        else if has(["תחזיר", "תדליק", "תפעיל"]) { out["animations"] = true }
+    }
+    var hex: String?
+    if let r = l.range(of: "#[0-9a-f]{6}|#[0-9a-f]{3}", options: .regularExpression) { hex = String(l[r]).uppercased() }
+    else if has(["כתום", "orange"]) { hex = defaultAccent }
+    else if has(["שחור", "black"]) { hex = "#000000" }
+    else { hex = colorNames.first(where: { l.contains($0.0) })?.1 }
+    if let hex {
+        if has(["רקע", "background"]) { out["background_color"] = hex }
+        else if has(["עיניים", "עין", "eyes", "eye"]) { out["eye_color"] = hex }
+        else { out["accent_color"] = hex }
+    }
+    return out.isEmpty ? nil : out
 }
 func parseColor(_ t: String) -> String? {
-    let l = t.lowercased()
-    let verb = l.contains("תחליף") || l.contains("תשנה") || l.contains("תעשה") || l.contains("שנה") || l.contains("החלף")
-    guard isColorInstruction(t) || (verb && colorNames.contains(where: { l.contains($0.0) })) else { return nil }
-    if l.contains("כתום") || l.contains("מקורי") || l.contains("ברירת מחדל") || l.contains("orange") { return "reset" }
-    if let r = l.range(of: "#[0-9a-f]{6}|#[0-9a-f]{3}", options: .regularExpression) { return String(l[r]).uppercased() }
-    return colorNames.first(where: { l.contains($0.0) })?.1
+    guard let c = parseAppearance(t) else { return nil }
+    if c["reset"] != nil { return "reset" }
+    return c["accent_color"] as? String
 }
 let okGreen = Color(red: 0.188, green: 0.82, blue: 0.345)   // #30D158
 
@@ -422,8 +470,8 @@ struct NotchShape: Shape {
 }
 
 extension View {
-    func islandSurface(radius: CGFloat) -> some View {
-        background(NotchShape(bottomRadius: radius).fill(Color.black)
+    func islandSurface(radius: CGFloat, fill: Color = .black) -> some View {
+        background(NotchShape(bottomRadius: radius).fill(fill)
             .shadow(color: .black.opacity(0.35), radius: 18, y: 10))
     }
 }
@@ -442,15 +490,16 @@ struct TimmyEye: View {
     @State private var blink = false
     var body: some View {
         Capsule()
-            .fill(amber)
+            .fill(eyeColor)
             .frame(width: big ? 11 : 9, height: blink ? 1.5 : (big ? 12 : 10))
-            .shadow(color: amber.opacity(0.75), radius: big ? 5 : 3.5)
+            .shadow(color: eyeColor.opacity(0.75), radius: big ? 5 : 3.5)
             .animation(.easeInOut(duration: 0.09), value: blink)
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: big)
             .onAppear { scheduleBlink() }
     }
     func scheduleBlink() {
         DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 2.8...5.5)) {
+            guard animOn else { scheduleBlink(); return }   // אנימציות כבויות: בלי מצמוץ
             blink = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { blink = false; scheduleBlink() }
         }
@@ -464,13 +513,13 @@ struct TimmyMouth: View {
     var body: some View {
         HStack(spacing: 2.5) {
             ForEach(0..<heights.count, id: \.self) { i in
-                Capsule().fill(amber.opacity(0.9))
-                    .frame(width: 2.5, height: phase ? heights[i] : max(2.5, heights[i] * 0.45))
+                Capsule().fill(eyeColor.opacity(0.9))
+                    .frame(width: 2.5, height: !animOn ? heights[i] * 0.8 : (phase ? heights[i] : max(2.5, heights[i] * 0.45)))
                     .animation(.easeInOut(duration: 0.5).repeatForever().delay(Double(i) * 0.06), value: phase)
             }
         }
-        .shadow(color: amber.opacity(0.5), radius: 3)
-        .onAppear { phase = true }
+        .shadow(color: eyeColor.opacity(0.5), radius: 3)
+        .onAppear { if animOn { phase = true } }
     }
 }
 
@@ -484,7 +533,7 @@ struct RecDot: View {
             .frame(width: size, height: size)
             .shadow(color: recRed.opacity(0.5), radius: 2)
             .opacity(pulsing ? (on ? 0.3 : 1) : 1)
-            .onAppear { if pulsing { withAnimation(.easeInOut(duration: 0.9).repeatForever()) { on = true } } }
+            .onAppear { if pulsing && animOn { withAnimation(.easeInOut(duration: 0.9).repeatForever()) { on = true } } }
     }
 }
 
@@ -526,9 +575,9 @@ struct BubbleView: View {
                 pill.transition(.opacity)
             }
         }
-        .animation(island, value: r.isCard)
+        .animation(animOn ? island : nil, value: r.isCard)
         .environment(\.colorScheme, .dark)
-        .id(Theme.accentHex)
+        .id(Theme.version)
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
     }
 
@@ -627,7 +676,7 @@ struct BubbleView: View {
         .padding(.horizontal, 18)
         .frame(width: cardBodyW, height: cardBodyH)
         .padding(.horizontal, shoulder)
-        .islandSurface(radius: 24)
+        .islandSurface(radius: 24, fill: bgColor)
     }
 
     func stopControl(_ finishing: Bool) -> some View {
@@ -706,7 +755,7 @@ struct BubbleView: View {
                 }
             }
             .padding(.vertical, 4)
-            .onAppear { on = true }
+            .onAppear { on = animOn }
         }
     }
 
@@ -893,11 +942,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openImprove() {
         improve.reload()
         if improveWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 600),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 720),
                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
-            w.backgroundColor = .black; w.appearance = NSAppearance(named: .darkAqua)
+            w.backgroundColor = NSColor(bgColor); w.appearance = NSAppearance(named: .darkAqua)
             w.contentView = NSHostingView(rootView: ImproveView(m: improve))
             w.center(); improveWindow = w
         }
@@ -911,7 +960,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
-            w.backgroundColor = .black; w.appearance = NSAppearance(named: .darkAqua)
+            w.backgroundColor = NSColor(bgColor); w.appearance = NSAppearance(named: .darkAqua)
             w.contentView = NSHostingView(rootView: OnboardingView(o: onboarding, close: { [weak w] in w?.close() }))
             w.center(); onboardingWindow = w
         }
@@ -956,7 +1005,7 @@ final class ImproveModel: ObservableObject {
     @Published var items: [String] = []
     @Published var draft = ""
     @Published var status: Status = .idle
-    let examples = ["תחליף את הצבע לכחול", "נקודות קצרות יותר, עד 8 מילים", "תוסיף סעיף \"החלטות\" בטבלה: נושא | מה סוכם | אחראי",
+    let examples = ["תחליף את הצבע לכחול", "עיניים ירוקות", "רקע כחול כהה", "תוריד אנימציות", "נקודות קצרות יותר, עד 8 מילים", "תוסיף סעיף \"החלטות\" בטבלה: נושא | מה סוכם | אחראי",
                     "תוסיף סעיף \"צעדים הבאים ללקוח\"", "תכתוב את הסיכום בגוף ראשון, כאילו אני כתבתי",
                     "בסוף תכתוב הודעת וואטסאפ קצרה ללקוח עם סיכום השיחה", "בלי אימוג'י ובלי הדגשות"]
     func reload() { items = (loadConfig()["custom_instructions"] as? [String]) ?? [] }
@@ -965,42 +1014,60 @@ final class ImproveModel: ObservableObject {
     func add(_ text: String? = nil) {
         let t = (text ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        // הוראת צבע: משנה את צבע האפליקציה מיד (הגדרת אפליקציה, לא הוראה לסיכום)
-        if let c = parseColor(t) {
-            applyColor(c == "reset" ? nil : c); if text == nil { draft = "" }
-            status = .done(c == "reset" ? "הצבע חזר לכתום" : "הצבע של טימי עודכן")
+        // הוראת מראה (צבע, רקע, עיניים, אנימציה): משנה את האפליקציה מיד, לא נשמרת כהוראה לסיכום
+        if isAppearanceInstruction(t) {
+            if text == nil { draft = "" }
+            if let c = parseAppearance(t) { applyAppearance(c) } else { askClaudeForAppearance(t) }
             return
-        }
-        if isColorInstruction(t) {   // ניסוח יצירתי ("הצבע של פייסבוק"): Claude מתרגם לצבע
-            askClaudeForColor(t); if text == nil { draft = "" }; return
         }
         guard !items.contains(t) else { return }
         items.append(t); save(); if text == nil { draft = "" }
     }
-    func applyColor(_ hex: String?) { Theme.set(hex); accent = Theme.accentHex }
-    func askClaudeForColor(_ t: String) {
-        guard let claude = Onboarding.shared?.claudePath() else { status = .failed("לא הבנתי איזה צבע. נסה למשל: תחליף לצבע כחול"); return }
+    func applyAppearance(_ c: [String: Any]) {
+        let wantedBg = c["background_color"] as? String
+        Theme.apply(c); accent = Theme.accentHex
+        if c["reset"] != nil { status = .done("המראה חזר לברירת המחדל"); return }
+        var parts: [String] = []
+        if c["accent_color"] != nil { parts.append("צבע") }
+        if c["eye_color"] != nil { parts.append("עיניים") }
+        if let w = wantedBg { parts.append(Theme.bgHex.uppercased() == w.uppercased() ? "רקע" : "רקע (הוכהה כדי שהטקסט יהיה קריא)") }
+        if let a = c["animations"] as? Bool { parts.append(a ? "אנימציות פעילות" : "אנימציות כבויות") }
+        status = .done("עודכן: " + parts.joined(separator: ", "))
+    }
+    func remove(_ i: Int) { guard items.indices.contains(i) else { return }; items.remove(at: i); save() }
+    func applyColor(_ hex: String?) { applyAppearance(hex == nil ? ["reset": true] : ["accent_color": hex!]) }
+    func askClaudeForAppearance(_ t: String) {
+        guard let claude = Onboarding.shared?.claudePath() else { status = .failed("לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה"); return }
         status = .working
+        let prompt = "המשתמש כתב הוראה לשינוי המראה של אפליקציה כהה (רקע שחור, טקסט לבן, צבע הדגשה כתום): \"" + t + "\". החזר JSON בלבד, עם רק המפתחות שהמשתמש ביקש לשנות מתוך: accent_color (#RRGGBB, כפתורים והדגשות), eye_color (#RRGGBB, העיניים והפה של הדמות), background_color (#RRGGBB, כהה מספיק לטקסט לבן), animations (true/false), reset (true, לחזרה לברירת המחדל). בלי שום טקסט נוסף."
         DispatchQueue.global().async {
             let p = Process(); p.executableURL = URL(fileURLWithPath: claude)
-            p.arguments = ["-p", "--model", "haiku", "המשתמש ביקש לשנות את צבע ההדגשה של אפליקציה כהה: \"\(t)\". החזר רק קוד צבע hex אחד בפורמט #RRGGBB, שנראה טוב על רקע שחור, בלי שום טקסט נוסף."]
+            p.arguments = ["-p", "--model", "haiku", prompt]
             p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
             let out = Pipe(); p.standardOutput = out; p.standardError = Pipe(); p.standardInput = FileHandle.nullDevice
-            var hex: String?
+            var changes: [String: Any]?
             if (try? p.run()) != nil {
                 let deadline = Date().addingTimeInterval(45)
                 while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
                 if p.isRunning { p.terminate() }
                 let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                if let r = text.range(of: "#[0-9A-Fa-f]{6}", options: .regularExpression) { hex = String(text[r]).uppercased() }
+                if let a = text.firstIndex(of: "{"), let b = text.lastIndex(of: "}"),
+                   let o = try? JSONSerialization.jsonObject(with: Data(text[a...b].utf8)) as? [String: Any] {
+                    var c: [String: Any] = [:]
+                    for k in ["accent_color", "eye_color", "background_color"] {
+                        if let v = o[k] as? String, v.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil { c[k] = v.uppercased() }
+                    }
+                    if let v = o["animations"] as? Bool { c["animations"] = v }
+                    if o["reset"] as? Bool == true { c["reset"] = true }
+                    if !c.isEmpty { changes = c }
+                }
             }
             DispatchQueue.main.async {
-                if let hex { self.applyColor(hex); self.status = .done("הצבע של טימי עודכן") }
-                else { self.status = .failed("לא הבנתי איזה צבע. נסה למשל: תחליף לצבע כחול") }
+                if let changes { self.applyAppearance(changes) }
+                else { self.status = .failed("לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה") }
             }
         }
     }
-    func remove(_ i: Int) { guard items.indices.contains(i) else { return }; items.remove(at: i); save() }
     // הסיכום האחרון בתיקיית ההקלטות
     func lastSummary() -> URL? {
         let fm = FileManager.default
@@ -1064,22 +1131,53 @@ struct ImproveView: View {
             Text("רעיונות").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
             FlowChips(items: m.examples.filter { !m.items.contains($0) }) { m.add($0) }
 
-            // צבע האפליקציה
-            HStack(spacing: 10) {
-                Circle().fill(colorFromHex(m.accent)).frame(width: 18, height: 18)
-                    .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
-                Text(he("צבע האפליקציה")).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.85))
+            AppearanceRow(m: m)
+
+            InstructionsList(m: m).frame(maxHeight: .infinity)
+
+            ImproveFooter(m: m)
+        .padding(.horizontal, 28).padding(.bottom, 24)
+        .frame(width: 560, height: 720)
+        .background(bgColor)
+        .environment(\.layoutDirection, .rightToLeft)
+    }
+}
+
+// שורת "מראה" בחלון השיפור: צבעים, אנימציות, איפוס
+struct AppearanceRow: View {
+    @ObservedObject var m: ImproveModel
+    var swatches: [(String, String)] {
+        let eye: String = Theme.eyeHex.isEmpty ? Theme.accentHex : Theme.eyeHex
+        return [("אפליקציה", Theme.accentHex), ("עיניים", eye), ("רקע", Theme.bgHex)]
+    }
+    var body: some View {
+            HStack(spacing: 12) {
+                Text(he("מראה")).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.85))
+                ForEach(swatches, id: \.0) { item in
+                    HStack(spacing: 5) {
+                        Circle().fill(colorFromHex(item.1)).frame(width: 14, height: 14)
+                            .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
+                        Text(he(item.0)).font(.system(size: 11)).foregroundColor(.white.opacity(0.6))
+                    }
+                }
+                Text(he(Theme.animations ? "אנימציות פעילות" : "אנימציות כבויות")).font(.system(size: 11)).foregroundColor(.white.opacity(0.6))
                 Spacer()
-                if m.accent != defaultAccent {
-                    Button(action: { m.applyColor(nil); m.status = .done("הצבע חזר לכתום") }) {
-                        Text(he("חזור לכתום")).font(.system(size: 12)).foregroundColor(.white.opacity(0.7))
+                if !Theme.isDefault {
+                    Button(action: { m.applyAppearance(["reset": true]) }) {
+                        Text(he("אפס מראה")).font(.system(size: 12)).foregroundColor(.white.opacity(0.7))
                             .padding(.vertical, 5).padding(.horizontal, 10).background(Capsule().fill(Color.white.opacity(0.08)))
                     }.buttonStyle(.plain)
                 }
             }
             .padding(.vertical, 8).padding(.horizontal, 12)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
+    }
+}
 
+struct InstructionsList: View {
+    @ObservedObject var m: ImproveModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
             // ההוראות השמורות
             Text("ההוראות שלך (\(m.items.count))").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
             ScrollView {
@@ -1103,8 +1201,15 @@ struct ImproveView: View {
                     }
                 }
             }
-            .frame(maxHeight: .infinity)
+            .frame(minHeight: 70, maxHeight: .infinity)
+        }
+    }
+}
 
+struct ImproveFooter: View {
+    @ObservedObject var m: ImproveModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
             // שיפור הסיכום האחרון
             VStack(spacing: 8) {
                 Button(action: { m.improveLast() }) {
@@ -1123,10 +1228,7 @@ struct ImproveView: View {
                 }
             }
         }
-        .padding(.horizontal, 28).padding(.bottom, 24)
-        .frame(width: 520, height: 600)
-        .background(Color.black)
-        .environment(\.layoutDirection, .rightToLeft)
+        }
     }
 }
 
@@ -1311,7 +1413,7 @@ struct OnboardingView: View {
         }
         .padding(.horizontal, 40).padding(.bottom, 30)
         .frame(width: 500, height: 600)
-        .background(Color.black)
+        .background(bgColor)
         .environment(\.layoutDirection, .rightToLeft)
         .animation(.easeInOut(duration: 0.2), value: o.step)
     }

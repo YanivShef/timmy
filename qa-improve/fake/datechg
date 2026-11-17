@@ -1,0 +1,5 @@
+#!/bin/bash
+python3 -c "
+import sys,re
+s=sys.stdin.read(); md=s.split(\"המסמך הנוכחי:\n\",1)[1].split(\"\n\nהתמלול:\n\",1)[0]
+print(md.replace(\"2026-11-10 14:30\",\"2025-01-01 09:00\").replace(\"דני\",\"משה\"))"
