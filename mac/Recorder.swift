@@ -872,6 +872,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 
+// תמונה מתוך Resources של האפליקציה (או מ-TIMMY_RES_DIR בבדיקות)
+func resImage(_ name: String) -> NSImage? {
+    if let p = Bundle.main.path(forResource: name, ofType: "png"), let i = NSImage(contentsOfFile: p) { return i }
+    if let d = ProcessInfo.processInfo.environment["TIMMY_RES_DIR"] { return NSImage(contentsOfFile: d + "/" + name + ".png") }
+    return nil
+}
+
 // MARK: - טימי: אונבורדינג הרשאות
 final class Onboarding: ObservableObject {
     @Published var step: Int
@@ -989,7 +996,7 @@ struct OnboardingView: View {
 
     var avatar: some View {
         Group {
-            if let path = Bundle.main.path(forResource: "timmy", ofType: "png"), let img = NSImage(contentsOfFile: path) {
+            if let img = resImage("timmy") {
                 Image(nsImage: img).resizable().interpolation(.high).frame(width: 96, height: 96)
                     .shadow(color: amber.opacity(0.35), radius: 16)
             } else { avatarFallback }
@@ -1043,13 +1050,19 @@ struct OnboardingView: View {
     // לינק לאינסטגרם של היוצר
     func instagramLink(_ label: String) -> some View {
         Button(action: { NSWorkspace.shared.open(URL(string: "https://www.instagram.com/yaniv_shef/")!) }) {
-            HStack(spacing: 6) {
-                Image(systemName: "camera.circle.fill").font(.system(size: 14))
+            HStack(spacing: 8) {
+                if let img = resImage("creator") {
+                    Image(nsImage: img).resizable().interpolation(.high).scaledToFill()
+                        .frame(width: 26, height: 26).clipShape(Circle())
+                        .overlay(Circle().stroke(amber.opacity(0.7), lineWidth: 1.2))
+                } else {
+                    Image(systemName: "camera.circle.fill").font(.system(size: 14))
+                }
                 Text(label).font(.system(size: 12, weight: .medium))
                 Text("@yaniv_shef").font(.system(size: 12, weight: .semibold)).environment(\.layoutDirection, .leftToRight)
             }
             .foregroundColor(amber.opacity(0.9))
-            .padding(.vertical, 6).padding(.horizontal, 12)
+            .padding(.vertical, 5).padding(.leading, 6).padding(.trailing, 14)
             .background(Capsule().stroke(amber.opacity(0.35), lineWidth: 1))
         }
         .buttonStyle(.plain)

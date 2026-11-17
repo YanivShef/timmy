@@ -167,6 +167,7 @@ else
 fi
 cp "$HERE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp "$HERE/timmy.png" "$APP/Contents/Resources/timmy.png"
+cp "$HERE/creator.png" "$APP/Contents/Resources/creator.png"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
