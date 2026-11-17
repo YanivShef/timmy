@@ -6,6 +6,7 @@ import Combine
 import ScreenCaptureKit
 import AVFoundation
 import CoreMedia
+import ServiceManagement
 
 enum Phase: Equatable { case idle, recording, finishing, message(String) }
 
@@ -14,15 +15,36 @@ struct Line: Identifiable { let id = UUID(); let t: String; let text: String; va
 let home = FileManager.default.homeDirectoryForCurrentUser
 // הכל מותקן ב-~/Library/Application Support/Timmy (ע"י install.sh)
 let appDir = home.appendingPathComponent("Library/Application Support/Timmy")
-let config: [String: Any] = {
-    guard let d = try? Data(contentsOf: appDir.appendingPathComponent("config.json")),
+let configURL = appDir.appendingPathComponent("config.json")
+func loadConfig() -> [String: Any] {
+    guard let d = try? Data(contentsOf: configURL),
           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
     return o
-}()
-let recDir: URL = {
-    if let p = config["output_dir"] as? String, !p.isEmpty { return URL(fileURLWithPath: (p as NSString).expandingTildeInPath) }
+}
+func saveConfig(_ updates: [String: Any]) {
+    var c = loadConfig()
+    for (k, v) in updates { c[k] = v }
+    try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+    if let d = try? JSONSerialization.data(withJSONObject: c, options: [.prettyPrinted, .withoutEscapingSlashes]) { try? d.write(to: configURL) }
+}
+// תיקיית ההקלטות נקראת מחדש בכל פעם (אפשר לשנות אותה באונבורדינג)
+var recDir: URL {
+    if let p = loadConfig()["output_dir"] as? String, !p.isEmpty { return URL(fileURLWithPath: (p as NSString).expandingTildeInPath) }
     return home.appendingPathComponent("Documents/טימי - הקלטות")
-}()
+}
+
+// מקום פנוי בדיסק של התיקייה (או של התיקייה הקיימת הקרובה אליה)
+func freeBytes(at url: URL) -> Int64 {
+    // לבדיקות: TIMMY_FAKE_FREE_MB מדמה דיסק כמעט מלא
+    if let f = ProcessInfo.processInfo.environment["TIMMY_FAKE_FREE_MB"], let v = Int64(f) { return v * mb }
+    var u = url
+    while !FileManager.default.fileExists(atPath: u.path) && u.path != "/" { u = u.deletingLastPathComponent() }
+    let v = try? u.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+    return v?.volumeAvailableCapacityForImportantUsage ?? Int64.max
+}
+let mb: Int64 = 1_000_000
+let minStartBytes: Int64 = 500 * mb   // פחות מזה לא מתחילים הקלטה (שעה של שיחה ≈ 250MB בזמן ההקלטה)
+let minKeepBytes: Int64 = 200 * mb    // פחות מזה באמצע הקלטה: עוצרים ושומרים מה שיש
 let worker = appDir.appendingPathComponent("live.py").path
 let python = appDir.appendingPathComponent("venv/bin/python").path
 
@@ -45,6 +67,7 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
     private var timer: Timer?
     private var startDate = Date()
     private var outBuf = Data()
+    private var stoppedForDisk = false
     private let q = DispatchQueue(label: "audio")
 
     var isCard: Bool { phase == .recording || phase == .finishing }
@@ -65,6 +88,13 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
     }
 
     @MainActor func start() async {
+        // בדיקת מקום לפני הקלטה
+        if freeBytes(at: recDir) < minStartBytes {
+            flash("אין מקום")
+            NotificationCenter.default.post(name: Notification.Name("timmy.diskFull"), object: nil)
+            return
+        }
+        stoppedForDisk = false
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             guard let chrome = content.applications.first(where: { $0.bundleIdentifier == "com.google.Chrome" }) else {
@@ -106,6 +136,11 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
             timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 self.elapsed = Int(Date().timeIntervalSince(self.startDate))
+                // כל 20 שניות: אם המקום נגמר, עוצרים ושומרים
+                if self.elapsed > 0 && self.elapsed % 20 == 0 && self.phase == .recording && freeBytes(at: recDir) < minKeepBytes {
+                    self.stoppedForDisk = true
+                    Task { @MainActor in await self.stop() }
+                }
             }
         } catch {
             NSLog("start error: \(error)")
@@ -156,6 +191,8 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
                 if sp == partialSpeaker { partial = ""; thinking = false }
             case "bullets": bullets = o["items"] as? [String] ?? bullets
             case "done": doneFile = o["txt"] as? String
+            case "diskfull":
+                if phase == .recording { stoppedForDisk = true; Task { @MainActor in await self.stop() } }
             default: break
             }
         }
@@ -176,7 +213,8 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
             Task { @MainActor in self.flash("לא נקלט דיבור") }
         } else {
             NSWorkspace.shared.activateFileViewerSelecting([txt])
-            Task { @MainActor in self.flash("נשמר ✓") }
+            let full = stoppedForDisk
+            Task { @MainActor in self.flash(full ? "נשמר, אין מקום" : "נשמר ✓") }
         }
     }
 
@@ -751,6 +789,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: Notification.Name("timmy.needPermissions"), object: nil, queue: .main) { [weak self] _ in
             self?.showOnboarding(step: 1)
         }
+        NotificationCenter.default.addObserver(forName: Notification.Name("timmy.diskFull"), object: nil, queue: .main) { [weak self] _ in
+            self?.showOnboarding(step: 4)
+        }
         if !UserDefaults.standard.bool(forKey: "onboarded") && !args.contains(where: { $0.hasPrefix("--demo") }) {
             showOnboarding(step: nil)
         }
@@ -792,7 +833,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func showOnboarding(step: Int?) {
         if let step { onboarding.go(step) }
         if onboardingWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 460),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 540),
                              styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
@@ -807,6 +848,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openFolder() {
         try? FileManager.default.createDirectory(at: recDir, withIntermediateDirectories: true)
         NSWorkspace.shared.open(recDir)
+    }
+
+    // פתיחה של האפליקציה כשהיא כבר רצה (מ-Spotlight / Launchpad / תיקיית היישומים): מראים את מסך ההגדרות
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showOnboarding(step: UserDefaults.standard.bool(forKey: "onboarded") ? 5 : nil)
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -829,6 +876,9 @@ final class Onboarding: ObservableObject {
     @Published var micOK = false
     @Published var micDenied = false
     @Published var chromeOK = false
+    @Published var folder = recDir.path
+    @Published var freeGB: Double = 0
+    @Published var launchAtLogin = false
     private var timer: Timer?
     init() {
         step = UserDefaults.standard.integer(forKey: "onboardingStep")
@@ -843,6 +893,28 @@ final class Onboarding: ObservableObject {
         if (st == .authorized) != micOK { micOK = st == .authorized }
         if (st == .denied || st == .restricted) != micDenied { micDenied = st == .denied || st == .restricted }
         if ch != chromeOK { chromeOK = ch }
+        let f = recDir.path
+        if f != folder { folder = f }
+        let g = (Double(freeBytes(at: recDir)) / 1e9 * 10).rounded() / 10
+        if g != freeGB { freeGB = g }
+        let l = SMAppService.mainApp.status == .enabled
+        if l != launchAtLogin { launchAtLogin = l }
+    }
+    func chooseFolder() {
+        let p = NSOpenPanel()
+        p.canChooseDirectories = true; p.canChooseFiles = false; p.canCreateDirectories = true
+        p.allowsMultipleSelection = false; p.prompt = "שמור כאן"
+        p.message = "איפה לשמור את השיחות, הסיכומים וההקלטות?"
+        p.directoryURL = recDir
+        NSApp.activate(ignoringOtherApps: true)
+        if p.runModal() == .OK, let u = p.url {
+            saveConfig(["output_dir": u.path]); refresh()
+        }
+    }
+    func setLaunchAtLogin(_ on: Bool) {
+        do { if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() } }
+        catch { NSLog("login item: \(error)") }
+        refresh()
     }
     func go(_ s: Int) { step = s; UserDefaults.standard.set(s, forKey: "onboardingStep") }
     func requestScreen() {
@@ -865,7 +937,14 @@ final class Onboarding: ObservableObject {
         try? t.run()
         NSApp.terminate(nil)
     }
-    func finish() { UserDefaults.standard.set(true, forKey: "onboarded"); go(0) }
+    func finish() {
+        // בפעם הראשונה: טימי עולה עם המחשב כברירת מחדל (אפשר לכבות במסך ההגדרות)
+        if !UserDefaults.standard.bool(forKey: "loginItemAsked") {
+            UserDefaults.standard.set(true, forKey: "loginItemAsked")
+            if !launchAtLogin { setLaunchAtLogin(true) }
+        }
+        UserDefaults.standard.set(true, forKey: "onboarded"); go(0)
+    }
 }
 
 struct OnboardingView: View {
@@ -877,7 +956,7 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             // התקדמות
             HStack(spacing: 6) {
-                ForEach(0..<5) { i in
+                ForEach(0..<6) { i in
                     Capsule().fill(i <= o.step ? amber : Color.white.opacity(0.15)).frame(width: i == o.step ? 22 : 8, height: 6)
                 }
             }
@@ -891,6 +970,7 @@ struct OnboardingView: View {
                 case 1: screenStep
                 case 2: micStep
                 case 3: chromeStep
+                case 4: folderStep
                 default: doneStep
                 }
             }
@@ -898,7 +978,7 @@ struct OnboardingView: View {
             Spacer(minLength: 18)
         }
         .padding(.horizontal, 40).padding(.bottom, 30)
-        .frame(width: 500, height: 460)
+        .frame(width: 500, height: 540)
         .background(Color.black)
         .environment(\.layoutDirection, .rightToLeft)
         .animation(.easeInOut(duration: 0.2), value: o.step)
@@ -946,10 +1026,10 @@ struct OnboardingView: View {
         }.buttonStyle(.plain)
     }
 
-    func status(_ ok: Bool, _ okText: String, _ waitText: String) -> some View {
+    func status(_ ok: Bool, _ okText: String, _ waitText: String, critical: Bool = false) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundColor(ok ? Color(red: 0.19, green: 0.82, blue: 0.35) : .white.opacity(0.4))
+            Image(systemName: ok ? "checkmark.circle.fill" : (critical ? "exclamationmark.triangle.fill" : "circle.dashed"))
+                .foregroundColor(ok ? Color(red: 0.19, green: 0.82, blue: 0.35) : (critical ? Color(red: 1, green: 0.27, blue: 0.27) : .white.opacity(0.4)))
             Text(ok ? okText : waitText).font(.system(size: 13, weight: .medium))
                 .foregroundColor(ok ? .white : .white.opacity(0.55))
         }
@@ -1033,6 +1113,35 @@ struct OnboardingView: View {
         }
     }
 
+    var shortFolder: String { FileManager.default.displayName(atPath: o.folder) }
+    var parentFolder: String { FileManager.default.displayName(atPath: (o.folder as NSString).deletingLastPathComponent) }
+    var spaceOK: Bool { o.freeGB >= 2 }
+
+    var folderStep: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "folder.fill").font(.system(size: 40)).foregroundColor(amber)
+            header("איפה לשמור את השיחות?", "לכל שיחה נשמרים סיכום, תמלול מלא והקלטה.\nשעה של שיחה תופסת בערך 30MB אחרי השמירה.")
+            HStack(spacing: 10) {
+                Image(systemName: "folder").foregroundColor(.white.opacity(0.6))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(shortFolder).font(.system(size: 14, weight: .semibold)).foregroundColor(.white).lineLimit(1)
+                    Text("בתוך \(parentFolder)").font(.system(size: 11)).foregroundColor(.white.opacity(0.5)).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 10).padding(.horizontal, 14)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+            status(spaceOK, String(format: "יש %.1f GB פנויים, מספיק להרבה שיחות", o.freeGB),
+                   o.freeGB < 0.5 ? String(format: "רק %.1f GB פנויים: אין מספיק מקום להקלטה. פנה מקום או בחר דיסק אחר", o.freeGB)
+                                  : String(format: "רק %.1f GB פנויים: מספיק לכמה שיחות, כדאי לפנות מקום", o.freeGB),
+                   critical: o.freeGB < 0.5)
+            HStack(spacing: 10) {
+                primary("המשך") { o.go(5) }
+                secondary("בחר תיקייה אחרת") { o.chooseFolder() }
+            }
+        }
+    }
+
     var doneStep: some View {
         VStack(spacing: 20) {
             avatar
@@ -1040,6 +1149,12 @@ struct OnboardingView: View {
             VStack(spacing: 8) {
                 status(o.screenOK, "קול של כרום: פעיל", "קול של כרום: לא פעיל")
                 status(o.micOK, "מיקרופון: פעיל", "מיקרופון: כבוי (רק הצד השני יוקלט)")
+                Button(action: { o.go(4) }) { status(spaceOK, "שמירה ב: " + shortFolder, "שמירה ב: " + shortFolder + " (מעט מקום)") }
+                    .buttonStyle(.plain)
+                Toggle(isOn: Binding(get: { o.launchAtLogin }, set: { o.setLaunchAtLogin($0) })) {
+                    Text("הפעל את טימי כשהמחשב נדלק").font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.85))
+                }
+                .toggleStyle(.switch).tint(amber)
             }
             primary("יאללה") { o.finish(); close() }
             instagramLink("טיפים ועדכונים באינסטגרם")

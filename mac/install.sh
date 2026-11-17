@@ -7,7 +7,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$HOME/Library/Application Support/Timmy"
-APP="$HOME/Applications/טימי.app"
+# מתקינים בתיקיית היישומים הרגילה (מופיע ב-Launchpad ובחיפוש); אם אין הרשאת כתיבה, בתיקיית היישומים של המשתמש
+if [[ -w /Applications ]]; then APP="/Applications/טימי.app"; else mkdir -p "$HOME/Applications"; APP="$HOME/Applications/טימי.app"; fi
 MODEL="mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx"
 
 NAME=""; ABOUT=""; PEOPLE=""; OUTDIR="$HOME/Documents/טימי - הקלטות"; VENV=""

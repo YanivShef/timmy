@@ -18,6 +18,7 @@ OWNER = (CFG.get("owner_name") or "אני").strip()
 OWNER_DESC = (CFG.get("owner_description") or "").strip()
 OWNER_LINE = f"{OWNER} ({OWNER_DESC})" if OWNER_DESC else OWNER
 NAMES = {0: "צד שני", 1: OWNER}
+disk_full = [False]
 lock = threading.Lock(); chunks = {0: [], 1: []}; eof = [False]; total = {0: 0, 1: 0}; got = {0: False, 1: False}
 
 def reader():
@@ -40,9 +41,16 @@ def reader():
         if d is None: break
         if ch not in (0, 1): continue
         a = np.frombuffer(d, dtype=np.float32).copy()
-        ws[ch].writeframes((np.clip(a, -1, 1) * 32767).astype(np.int16).tobytes())
+        try:
+            if not disk_full[0]: ws[ch].writeframes((np.clip(a, -1, 1) * 32767).astype(np.int16).tobytes())
+        except OSError:
+            # הדיסק התמלא: מפסיקים לכתוב אודיו, ממשיכים לתמלל, ומבקשים מהאפליקציה לעצור
+            disk_full[0] = True
+            print(json.dumps({"type": "diskfull"}), flush=True)
         with lock: chunks[ch].append(a); total[ch] += len(a); got[ch] = True
-    for w in ws.values(): w.close()
+    for w in ws.values():
+        try: w.close()
+        except OSError: pass
     eof[0] = True
 threading.Thread(target=reader, daemon=True).start()
 
