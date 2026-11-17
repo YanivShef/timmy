@@ -1,0 +1,1054 @@
+// בועת הקלטה צפה בסגנון Liquid Glass, עם תמלול בלייב של האודיו של Google Chrome בלבד.
+// לחיצה = התחלה/עצירה, גרירה = הזזה, קליק ימני = תפריט.
+import Cocoa
+import SwiftUI
+import Combine
+import ScreenCaptureKit
+import AVFoundation
+import CoreMedia
+
+enum Phase: Equatable { case idle, recording, finishing, message(String) }
+
+struct Line: Identifiable { let id = UUID(); let t: String; let text: String; var speaker: String = "other" }  // speaker: "me" (אתה) / "other"
+
+let home = FileManager.default.homeDirectoryForCurrentUser
+// הכל מותקן ב-~/Library/Application Support/Timmy (ע"י install.sh)
+let appDir = home.appendingPathComponent("Library/Application Support/Timmy")
+let config: [String: Any] = {
+    guard let d = try? Data(contentsOf: appDir.appendingPathComponent("config.json")),
+          let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
+    return o
+}()
+let recDir: URL = {
+    if let p = config["output_dir"] as? String, !p.isEmpty { return URL(fileURLWithPath: (p as NSString).expandingTildeInPath) }
+    return home.appendingPathComponent("Documents/טימי - הקלטות")
+}()
+let worker = appDir.appendingPathComponent("live.py").path
+let python = appDir.appendingPathComponent("venv/bin/python").path
+
+final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelegate {
+    @Published var phase: Phase = .idle
+    @Published var elapsed = 0
+    @Published var lines: [Line] = []
+    @Published var partial = ""
+    @Published var partialSpeaker = "other"
+    @Published var thinking = false   // מזוהה דיבור אבל עוד אין טקסט אמין: מציגים "מתמלל…"
+    @Published var loading = false
+    @Published var level: Float = 0   // עוצמת קול נוכחית 0...1, לוויזואליזציה
+    @Published var bullets: [String] = []
+
+    private var stream: SCStream?
+    private var proc: Process?
+    private var stdinHandle: FileHandle?
+    private var base = ""
+    private var doneFile: String?
+    private var timer: Timer?
+    private var startDate = Date()
+    private var outBuf = Data()
+    private let q = DispatchQueue(label: "audio")
+
+    var isCard: Bool { phase == .recording || phase == .finishing }
+
+    func toggle() {
+        switch phase {
+        case .idle, .message: Task { @MainActor in await self.start() }
+        case .recording: Task { @MainActor in await self.stop() }
+        case .finishing: break
+        }
+    }
+
+    @MainActor func flash(_ text: String) {
+        phase = .message(text)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            if case .message = self?.phase { self?.phase = .idle }
+        }
+    }
+
+    @MainActor func start() async {
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            guard let chrome = content.applications.first(where: { $0.bundleIdentifier == "com.google.Chrome" }) else {
+                flash("כרום סגור"); return
+            }
+            guard let display = content.displays.first else { flash("שגיאה"); return }
+            let filter = SCContentFilter(display: display, including: [chrome], exceptingWindows: [])
+            let cfg = SCStreamConfiguration()
+            cfg.capturesAudio = true
+            cfg.excludesCurrentProcessAudio = true
+            cfg.sampleRate = 16000
+            cfg.channelCount = 1
+            cfg.width = 2; cfg.height = 2
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+            // גם המיקרופון שלך, כערוץ נפרד (macOS 15+)
+            if #available(macOS 15.0, *) { cfg.captureMicrophone = true }
+
+            try FileManager.default.createDirectory(at: recDir, withIntermediateDirectories: true)
+            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH-mm-ss"
+            base = recDir.appendingPathComponent("\(df.string(from: Date())) כרום").path
+            lines = []; partial = ""; loading = true; bullets = []; doneFile = nil
+            try launchWorker()
+
+            var s = SCStream(filter: filter, configuration: cfg, delegate: self)
+            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: q)
+            if #available(macOS 15.0, *) { try? s.addStreamOutput(self, type: .microphone, sampleHandlerQueue: q) }
+            do {
+                try await s.startCapture()
+            } catch {
+                // אין הרשאת מיקרופון? ממשיכים עם כרום בלבד
+                NSLog("start with mic failed: \(error), retrying chrome only")
+                if #available(macOS 15.0, *) { cfg.captureMicrophone = false }
+                s = SCStream(filter: filter, configuration: cfg, delegate: self)
+                try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: q)
+                try await s.startCapture()
+            }
+            stream = s
+            startDate = Date(); elapsed = 0; phase = .recording
+            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                self.elapsed = Int(Date().timeIntervalSince(self.startDate))
+            }
+        } catch {
+            NSLog("start error: \(error)")
+            stdinHandle?.closeFile(); stdinHandle = nil
+            flash("צריך הרשאה")
+            NotificationCenter.default.post(name: Notification.Name("timmy.needPermissions"), object: nil)
+        }
+    }
+
+    private func launchWorker() throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: python)
+        p.arguments = [worker, base]
+        let inPipe = Pipe(), outPipe = Pipe()
+        p.standardInput = inPipe; p.standardOutput = outPipe
+        p.standardError = FileHandle(forWritingAtPath: "/dev/null")
+        outBuf = Data()
+        outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            guard !d.isEmpty else { return }
+            DispatchQueue.main.async { self?.consume(d) }
+        }
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async { self?.workerDone() }
+        }
+        try p.run()
+        proc = p; stdinHandle = inPipe.fileHandleForWriting
+    }
+
+    private func consume(_ d: Data) {
+        outBuf.append(d)
+        while let nl = outBuf.firstIndex(of: 0x0A) {
+            let lineData = outBuf[outBuf.startIndex..<nl]
+            outBuf.removeSubrange(outBuf.startIndex...nl)
+            guard let o = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let type = o["type"] as? String else { continue }
+            switch type {
+            case "ready": loading = false
+            case "partial":
+                let sp = o["speaker"] as? String ?? "other"
+                let t = o["text"] as? String ?? ""
+                if !t.isEmpty { partial = t; partialSpeaker = sp; thinking = false }
+                else if (o["thinking"] as? Bool) == true { partial = ""; partialSpeaker = sp; thinking = true }
+                else if sp == partialSpeaker { partial = ""; thinking = false }
+            case "final":
+                let sp = o["speaker"] as? String ?? "other"
+                lines.append(Line(t: o["t"] as? String ?? "", text: o["text"] as? String ?? "", speaker: sp))
+                if sp == partialSpeaker { partial = ""; thinking = false }
+            case "bullets": bullets = o["items"] as? [String] ?? bullets
+            case "done": doneFile = o["txt"] as? String
+            default: break
+            }
+        }
+    }
+
+    @MainActor func stop() async {
+        timer?.invalidate(); timer = nil
+        try? await stream?.stopCapture(); stream = nil
+        phase = .finishing
+        q.sync { stdinHandle?.closeFile(); stdinHandle = nil }
+    }
+
+    private func workerDone() {
+        proc = nil
+        let txt = URL(fileURLWithPath: doneFile ?? (base + ".txt"))
+        if lines.isEmpty {
+            try? FileManager.default.removeItem(at: txt)
+            Task { @MainActor in self.flash("לא נקלט דיבור") }
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([txt])
+            Task { @MainActor in self.flash("נשמר ✓") }
+        }
+    }
+
+    // דמו לעיצוב: מציג כרטיס עם טקסט לדוגמה, בלי הקלטה
+    func startDemo(finishing: Bool) {
+        lines = [Line(t: "00:00:04", text: "אז מי שהיה בסדנה תרשמו לי כן."),
+                 Line(t: "00:00:08", text: "שזה לא אתה אלא דמותי, ניקח את זה כמחמאה, כן כן מהסדנה, איזה כיף."),
+                 Line(t: "00:00:14", text: "יש כאן מישהו שלא היה בסדנה? זה מעניין אותי, מישהו שלא היה ובכל זאת הגיע."),
+                 Line(t: "00:00:20", text: "אני לא הייתי, אבל ראיתי את ההקלטה.", speaker: "me")]
+        partial = args.contains("--demo-thinking") ? "" : "אני לא הייתי, אוקיי, אז בואו נתחיל"
+        thinking = args.contains("--demo-thinking")
+        bullets = ["הסדנה הקודמת עברה טוב, רוב המשתתפים חזרו", "יש כמה משתתפים חדשים שלא היו בסדנה", "המטרה היום: לבנות סוכן ראשון ב-Claude Code"]
+        loading = false; elapsed = 83; phase = finishing ? .finishing : .recording
+        Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            self?.level = Float.random(in: 0.05...0.9)
+        }
+    }
+
+    private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+    private var converters: [Int: (AVAudioFormat, AVAudioConverter)] = [:]
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        var chan = -1
+        if type == .audio { chan = 0 }
+        if #available(macOS 15.0, *), type == .microphone { chan = 1 }
+        guard chan >= 0, sb.isValid, let h = stdinHandle,
+              let asbd = sb.formatDescription?.audioStreamBasicDescription else { return }
+        var a = asbd
+        guard let fmt = AVAudioFormat(streamDescription: &a) else { return }
+        let n = AVAudioFrameCount(sb.numSamples)
+        guard n > 0, let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: n) else { return }
+        buf.frameLength = n
+        guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sb, at: 0, frameCount: Int32(n), into: buf.mutableAudioBufferList) == noErr else { return }
+
+        // המרה ל-16kHz מונו float32 אם צריך (המיקרופון מגיע בפורמט המקורי שלו)
+        var out = buf
+        if fmt.sampleRate != 16000 || fmt.channelCount != 1 || fmt.commonFormat != .pcmFormatFloat32 {
+            if converters[chan]?.0 != fmt { converters[chan] = (fmt, AVAudioConverter(from: fmt, to: target)!) }
+            let conv = converters[chan]!.1
+            let cap = AVAudioFrameCount(Double(n) * 16000 / fmt.sampleRate) + 32
+            guard let ob = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: cap) else { return }
+            var fed = false
+            var err: NSError?
+            conv.convert(to: ob, error: &err) { _, status in
+                if fed { status.pointee = .noDataNow; return nil }
+                fed = true; status.pointee = .haveData; return buf
+            }
+            if err != nil { return }
+            out = ob
+        }
+        guard let ch = out.floatChannelData, out.frameLength > 0 else { return }
+        let m = Int(out.frameLength)
+        if chan == 0 {
+            var sum: Float = 0
+            for i in 0..<m { sum += ch[0][i] * ch[0][i] }
+            let rms = (sum / Float(m)).squareRoot()
+            let lv = min(1, max(0, (20 * log10(max(rms, 1e-6)) + 50) / 45))
+            DispatchQueue.main.async { self.level = max(lv, self.level * 0.6) }
+        }
+        var header = Data([UInt8(chan)])
+        var count = UInt32(m).littleEndian
+        header.append(Data(bytes: &count, count: 4))
+        do { try h.write(contentsOf: header + Data(bytes: ch[0], count: m * MemoryLayout<Float>.size)) } catch { NSLog("pipe write: \(error)") }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        NSLog("stream stopped: \(error)")
+        Task { @MainActor in if self.phase == .recording { await self.stop() } }
+    }
+}
+
+// MARK: - תצוגה
+
+// המסגרת של כפתור העצירה בקואורדינטות החלון (מלמעלה-שמאל). כל עיצוב חייב לסמן את כפתור העצירה ב-.stopButtonArea()
+var stopRect: CGRect = .zero
+extension View {
+    func stopButtonArea() -> some View {
+        background(GeometryReader { g in
+            Color.clear
+                .onAppear { stopRect = g.frame(in: .global) }
+                .onChange(of: g.frame(in: .global)) { _, f in stopRect = f }
+        })
+    }
+}
+
+// מצב דמו לעיצוב: --demo-idle / --demo-card / --demo-finishing, ו---offset-y N להזזה אנכית
+let args = CommandLine.arguments
+func argValue(_ k: String) -> Double? {
+    guard let i = args.firstIndex(of: k), i + 1 < args.count else { return nil }
+    return Double(args[i + 1])
+}
+
+// MARK: עיצוב A: "Dynamic Island" מחובר לנוטש — קפסולה שחורה שיוצאת מהנוטש ונפתחת לכרטיס כלפי מטה
+
+let recRed = Color(red: 1.0, green: 0.27, blue: 0.27)
+let amber = Color(red: 1.0, green: 0.627, blue: 0.275)
+let okGreen = Color(red: 0.188, green: 0.82, blue: 0.345)   // #30D158
+
+// מידות הנוטש מהמסך בזמן ריצה; במסך בלי נוטש: אותה צורה במרכז העליון בגובה 32
+struct NotchGeo {
+    let width: CGFloat, height: CGFloat, centerX: CGFloat, top: CGFloat
+    static let current: NotchGeo = {
+        guard let s = NSScreen.main ?? NSScreen.screens.first else { return NotchGeo(width: 160, height: 32, centerX: 0, top: 0) }
+        if s.safeAreaInsets.top > 0, let l = s.auxiliaryTopLeftArea, let r = s.auxiliaryTopRightArea {
+            return NotchGeo(width: r.minX - l.maxX, height: s.safeAreaInsets.top, centerX: (l.maxX + r.minX) / 2, top: s.frame.maxY)
+        }
+        return NotchGeo(width: 160, height: 32, centerX: s.frame.midX, top: s.frame.maxY)
+    }()
+}
+let notch = NotchGeo.current
+
+let shoulder: CGFloat = 8            // הקימור הקעור במקום שהצורה פוגשת את שורת התפריטים
+let sideMargin: CGFloat = 26         // מרווח שקוף לצל בצדדים
+let bottomMargin: CGFloat = 40       // מרווח שקוף לצל למטה (אין מרווח למעלה)
+let wingW: CGFloat = 46, msgWingW: CGFloat = 84, hoverGrow: CGFloat = 6
+let cardBodyW: CGFloat = 600
+let cardBodyH: CGFloat = notch.height + 188
+let island = Animation.spring(response: 0.38, dampingFraction: 0.86)
+
+// גודל החלון: הצורה + שוליים לצל
+let mouthH: CGFloat = 16            // הפה של טימי יורד מתחת לנוטש בריחוף
+let dotFrame = NSSize(width: notch.width + 2 * (msgWingW + hoverGrow) + 2 * shoulder + 2 * sideMargin,
+                      height: notch.height + mouthH + bottomMargin)
+let cardSize = NSSize(width: cardBodyW + 2 * shoulder + 2 * sideMargin, height: cardBodyH + bottomMargin)
+
+// מצב ריחוף, מוזן מ-BubbleHost (tracking area שעובד גם כשהאפליקציה לא פעילה)
+final class HoverState: ObservableObject {
+    @Published var over = false
+    @Published var overStop = false
+}
+let hover = HoverState()
+
+// צורת הנוטש: למעלה ישר וצמוד למסך עם "כתפיים" קעורות, למטה פינות רציפות
+struct NotchShape: Shape {
+    var bottomRadius: CGFloat
+    var animatableData: CGFloat { get { bottomRadius } set { bottomRadius = newValue } }
+    func path(in r: CGRect) -> Path {
+        let s = shoulder, w = r.width, h = r.height
+        let br = max(0, min(bottomRadius, (w - 2 * s) / 2, h - s))
+        let k: CGFloat = 0.32   // נקודות בקרה קרובות לפינה = פינה רציפה (squircle)
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX, y: r.minY))
+        p.addQuadCurve(to: CGPoint(x: r.minX + s, y: r.minY + s), control: CGPoint(x: r.minX + s, y: r.minY))
+        p.addLine(to: CGPoint(x: r.minX + s, y: r.minY + h - br))
+        p.addCurve(to: CGPoint(x: r.minX + s + br, y: r.minY + h),
+                   control1: CGPoint(x: r.minX + s, y: r.minY + h - br * k),
+                   control2: CGPoint(x: r.minX + s + br * k, y: r.minY + h))
+        p.addLine(to: CGPoint(x: r.minX + w - s - br, y: r.minY + h))
+        p.addCurve(to: CGPoint(x: r.minX + w - s, y: r.minY + h - br),
+                   control1: CGPoint(x: r.minX + w - s - br * k, y: r.minY + h),
+                   control2: CGPoint(x: r.minX + w - s, y: r.minY + h - br * k))
+        p.addLine(to: CGPoint(x: r.minX + w - s, y: r.minY + s))
+        p.addQuadCurve(to: CGPoint(x: r.minX + w, y: r.minY), control: CGPoint(x: r.minX + w - s, y: r.minY))
+        p.closeSubpath()
+        return p
+    }
+}
+
+extension View {
+    func islandSurface(radius: CGFloat) -> some View {
+        background(NotchShape(bottomRadius: radius).fill(Color.black)
+            .shadow(color: .black.opacity(0.35), radius: 18, y: 10))
+    }
+}
+
+// הכרטיס "יורד" מהנוטש: מתיחה אנכית מלמעלה
+struct DropDown: ViewModifier {
+    let y: CGFloat, alpha: Double
+    func body(content: Content) -> some View {
+        content.scaleEffect(x: 1, y: y, anchor: .top).opacity(alpha)
+    }
+}
+
+// העין של טימי: עיגול אמבר זוהר שממצמץ מדי פעם
+struct TimmyEye: View {
+    var big = false
+    @State private var blink = false
+    var body: some View {
+        Capsule()
+            .fill(amber)
+            .frame(width: big ? 11 : 9, height: blink ? 1.5 : (big ? 12 : 10))
+            .shadow(color: amber.opacity(0.75), radius: big ? 5 : 3.5)
+            .animation(.easeInOut(duration: 0.09), value: blink)
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: big)
+            .onAppear { scheduleBlink() }
+    }
+    func scheduleBlink() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 2.8...5.5)) {
+            blink = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { blink = false; scheduleBlink() }
+        }
+    }
+}
+
+// הפה של טימי: גל קול קטן שנושם
+struct TimmyMouth: View {
+    @State private var phase = false
+    let heights: [CGFloat] = [3, 6, 9, 5, 10, 6, 3]
+    var body: some View {
+        HStack(spacing: 2.5) {
+            ForEach(0..<heights.count, id: \.self) { i in
+                Capsule().fill(amber.opacity(0.9))
+                    .frame(width: 2.5, height: phase ? heights[i] : max(2.5, heights[i] * 0.45))
+                    .animation(.easeInOut(duration: 0.5).repeatForever().delay(Double(i) * 0.06), value: phase)
+            }
+        }
+        .shadow(color: amber.opacity(0.5), radius: 3)
+        .onAppear { phase = true }
+    }
+}
+
+// נקודת הקלטה
+struct RecDot: View {
+    var size: CGFloat = 8
+    var pulsing = false
+    @State private var on = false
+    var body: some View {
+        Circle().fill(recRed)
+            .frame(width: size, height: size)
+            .shadow(color: recRed.opacity(0.5), radius: 2)
+            .opacity(pulsing ? (on ? 0.3 : 1) : 1)
+            .onAppear { if pulsing { withAnimation(.easeInOut(duration: 0.9).repeatForever()) { on = true } } }
+    }
+}
+
+// גל קול חי, מונוכרומטי, היסטוריה מתגלגלת
+struct Waveform: View {
+    var level: Float
+    var active: Bool
+    static let bars = 18
+    @State private var hist: [CGFloat] = Array(repeating: 0, count: Waveform.bars)
+    var body: some View {
+        HStack(alignment: .center, spacing: 2.5) {
+            ForEach(0..<Waveform.bars, id: \.self) { i in
+                let v = active ? hist[i] : 0
+                Capsule()
+                    .fill(Color.white.opacity(active ? 0.35 + 0.55 * Double(v) : 0.25))
+                    .frame(width: 2.5, height: 3 + v * 11)
+            }
+        }
+        .frame(height: 14)
+        .animation(.easeOut(duration: 0.12), value: hist)
+        .onChange(of: level) { _, lv in
+            var h = hist
+            h.removeFirst()
+            h.append(min(1, (h.last ?? 0) * 0.25 + CGFloat(lv) * 0.75))
+            hist = h
+        }
+    }
+}
+
+struct BubbleView: View {
+    @ObservedObject var r: Recorder
+    @ObservedObject var hv = hover
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if r.isCard {
+                card.transition(.modifier(active: DropDown(y: 0.6, alpha: 0), identity: DropDown(y: 1, alpha: 1)))
+            } else {
+                pill.transition(.opacity)
+            }
+        }
+        .animation(island, value: r.isCard)
+        .environment(\.colorScheme, .dark)
+        .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
+    }
+
+    // MARK: מנוחה: הנוטש + שתי כנפיים
+    var message: String? { if case .message(let t) = r.phase { return t } else { return nil } }
+
+    // MARK: מנוחה: טימי. הנוטש הוא הפנים שלו, עין בכל צד, ופה של גל קול שיורד בריחוף
+    @ViewBuilder var pill: some View {
+        if message == nil { timmyFace } else { statusPill }
+    }
+
+    var timmyFace: some View {
+        let w = wingW + (hv.over ? hoverGrow : 0)
+        return VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                TimmyEye(big: hv.over).frame(width: w)
+                Color.clear.frame(width: notch.width)
+                TimmyEye(big: hv.over).frame(width: w)
+            }
+            .frame(height: notch.height)
+            if hv.over {
+                TimmyMouth()
+                    .frame(height: mouthH - 4)
+                    .padding(.bottom, 4)
+                    .transition(.opacity.combined(with: .scale(scale: 0.6, anchor: .top)))
+            }
+        }
+        .padding(.horizontal, shoulder)
+        .islandSurface(radius: hv.over ? 14 : 12)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: hv.over)
+    }
+
+    var statusPill: some View {
+        let msg = message
+        let w = (msg != nil ? msgWingW : wingW) + (hv.over ? hoverGrow : 0)
+        let saved = msg?.contains("נשמר") ?? false
+        return HStack(spacing: 0) {
+            // כנף שמאל: נקודה אדומה / סימן סטטוס
+            ZStack {
+                if msg == nil {
+                    RecDot(size: 8)
+                } else if saved {
+                    Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(okGreen)
+                } else {
+                    Image(systemName: "exclamationmark").font(.system(size: 11, weight: .bold)).foregroundStyle(amber)
+                }
+            }
+            .frame(width: w)
+            Color.clear.frame(width: notch.width)
+            // כנף ימין: טקסט
+            Text(msg.map { $0.replacingOccurrences(of: " ✓", with: "") } ?? "הקלטה")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1).minimumScaleFactor(0.8)
+                .frame(width: w - 12, alignment: .trailing)
+                .padding(.trailing, 12)
+                .id(msg ?? "idle")
+                .transition(.opacity)
+        }
+        .frame(height: notch.height)
+        .padding(.horizontal, shoulder)
+        .islandSurface(radius: 12)
+        .animation(.easeOut(duration: 0.2), value: hv.over)
+        .animation(island, value: msg)
+    }
+
+    // MARK: כרטיס הקלטה
+    var card: some View {
+        let finishing = r.phase == .finishing
+        return VStack(spacing: 0) {
+            // כותרת בתוך פס הנוטש
+            HStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    stopControl(finishing)
+                    Waveform(level: r.level, active: !finishing)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Color.clear.frame(width: notch.width)
+                HStack(spacing: 7) {
+                    Text(String(format: "%d:%02d", r.elapsed / 60, r.elapsed % 60))
+                        .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.white.opacity(finishing ? 0.5 : 1))
+                    RecDot(size: 7, pulsing: true).opacity(finishing ? 0 : 1)
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .frame(height: notch.height)
+
+            HStack(alignment: .top, spacing: 16) {
+                notes.frame(width: 220)
+                transcript
+            }
+            .padding(.top, 12)
+            .padding(.bottom, 16)
+        }
+        .padding(.horizontal, 18)
+        .frame(width: cardBodyW, height: cardBodyH)
+        .padding(.horizontal, shoulder)
+        .islandSurface(radius: 24)
+    }
+
+    func stopControl(_ finishing: Bool) -> some View {
+        HStack(spacing: 6) {
+            if finishing {
+                ProgressView().controlSize(.mini).tint(.white)
+                Text("שומר…").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.7))
+            } else {
+                RoundedRectangle(cornerRadius: 2.5, style: .continuous).fill(recRed).frame(width: 9, height: 9)
+                Text("עצור").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.9))
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: min(28, notch.height - 4))
+        .background(Capsule().fill(Color.white.opacity(hv.overStop && !finishing ? 0.2 : 0.12)))
+        .animation(.easeOut(duration: 0.15), value: hv.overStop)
+        .stopButtonArea()
+    }
+
+    var notes: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(amber)
+                Text("נקודות עיקריות").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white.opacity(0.5))
+            }
+            if r.bullets.isEmpty {
+                bulletRow("הנקודות יופיעו תוך דקה…", dot: false)
+            } else {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(r.bullets.enumerated()), id: \.offset) { _, b in
+                            bulletRow(b, dot: true).transition(.opacity)
+                        }
+                    }
+                    .animation(.easeOut(duration: 0.3), value: r.bullets)
+                    .padding(.top, 2)
+                }
+                .defaultScrollAnchor(.top, for: .alignment)
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                .mask(VStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 8)
+                    Rectangle()
+                })
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.07)))
+        .environment(\.layoutDirection, .rightToLeft)
+    }
+
+    // שורת נקודה; במצב ריק הנקודה שקופה כך שהטקסט מתיישר בדיוק על קצה טקסט הבולטים
+    func bulletRow(_ s: String, dot: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 7) {
+            Circle().fill(dot ? amber.opacity(0.85) : .clear).frame(width: 4, height: 4)
+                .alignmentGuide(.firstTextBaseline) { d in d[.bottom] + 3.5 }
+            Text(s).font(.system(size: 12.5))
+                .foregroundStyle(.white.opacity(dot ? 0.8 : 0.3))
+                .lineSpacing(1.5)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // אנימציית "מתמלל": שלוש נקודות שעולות ויורדות
+    struct ThinkingDots: View {
+        @State private var on = false
+        var body: some View {
+            HStack(spacing: 5) {
+                Text("מתמלל").font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.4))
+                ForEach(0..<3) { i in
+                    Circle().fill(Color.white.opacity(0.55)).frame(width: 5, height: 5)
+                        .offset(y: on ? -3 : 2)
+                        .animation(.easeInOut(duration: 0.45).repeatForever().delay(Double(i) * 0.15), value: on)
+                }
+            }
+            .padding(.vertical, 4)
+            .onAppear { on = true }
+        }
+    }
+
+    // תווית דובר קטנה: "אני" בכתום, "צד שני" באפור
+    func speakerTag(_ sp: String, show: Bool) -> Text {
+        guard show else { return Text("") }
+        return Text(sp == "me" ? "אני  " : "צד שני  ")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(sp == "me" ? Color(red: 1.0, green: 0.627, blue: 0.275) : .white.opacity(0.5))
+    }
+
+    var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Color.clear.frame(height: 6)
+                    ForEach(Array(r.lines.enumerated()), id: \.element.id) { i, l in
+                        (speakerTag(l.speaker, show: i == 0 || r.lines[i - 1].speaker != l.speaker)
+                         + Text(l.text).font(.system(size: 16)).foregroundColor(.white.opacity(l.speaker == "me" ? 0.78 : 0.95)))
+                            .lineSpacing(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if !r.partial.isEmpty {
+                        (speakerTag(r.partialSpeaker, show: r.lines.last?.speaker != r.partialSpeaker)
+                         + Text(r.partial).font(.system(size: 16)).foregroundColor(.white.opacity(0.45)))
+                            .lineSpacing(3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if r.partial.isEmpty && r.thinking {
+                        HStack(spacing: 6) {
+                            if r.lines.last?.speaker != r.partialSpeaker { speakerTag(r.partialSpeaker, show: true) }
+                            ThinkingDots()
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if r.lines.isEmpty && r.partial.isEmpty && !r.thinking {
+                        Text(r.loading ? "טוען מודל…" : "מקשיב…")
+                            .font(.system(size: 14)).foregroundStyle(.white.opacity(0.35))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Color.clear.frame(height: 1).id("end")
+                }
+                .environment(\.layoutDirection, .rightToLeft)
+            }
+            .mask(VStack(spacing: 0) {
+                LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom).frame(height: 14)
+                Rectangle()
+            })
+            .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+            .onChange(of: r.lines.count) { _, _ in withAnimation { proxy.scrollTo("end", anchor: .bottom) } }
+            .onChange(of: r.partial) { _, _ in proxy.scrollTo("end", anchor: .bottom) }
+        }
+    }
+}
+
+// בלי גרירה (הבועה מעוגנת לנוטש). לחיצה: בבועה = התחלה, בכרטיס = עצירה רק על הכפתור. ריחוף מזין את HoverState.
+final class BubbleHost: NSHostingView<BubbleView> {
+    var onClick: (NSPoint) -> Void = { _ in }
+    private var tracking: NSTrackingArea?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let t = tracking { removeTrackingArea(t) }
+        let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                               owner: self, userInfo: nil)
+        addTrackingArea(t); tracking = t
+    }
+    private func updateHover(_ e: NSEvent?) {
+        guard let e else { hover.over = false; hover.overStop = false; return }
+        let p = e.locationInWindow
+        let flipped = CGPoint(x: p.x, y: bounds.height - p.y)
+        // ריחוף רק מעל הצורה עצמה (לא מעל שולי הצל)
+        let inShape = flipped.y <= bounds.height - bottomMargin && abs(flipped.x - bounds.midX) <= bounds.width / 2 - sideMargin
+        if hover.over != inShape { hover.over = inShape }
+        let s = stopRect.insetBy(dx: -6, dy: -6).contains(flipped)
+        if hover.overStop != s { hover.overStop = s }
+    }
+    override func mouseEntered(with e: NSEvent) { updateHover(e) }
+    override func mouseMoved(with e: NSEvent) { updateHover(e) }
+    override func mouseExited(with e: NSEvent) { updateHover(nil) }
+    override func mouseDown(with e: NSEvent) {}
+    override func mouseDragged(with e: NSEvent) {}
+    override func mouseUp(with e: NSEvent) { onClick(e.locationInWindow) }
+    override func rightMouseDown(with e: NSEvent) {
+        let m = NSMenu()
+        m.addItem(withTitle: "פתח תיקיית הקלטות", action: #selector(AppDelegate.openFolder), keyEquivalent: "")
+        m.addItem(withTitle: "הרשאות והגדרה (טימי)", action: #selector(AppDelegate.openOnboarding), keyEquivalent: "")
+        m.addItem(.separator())
+        m.addItem(withTitle: "יציאה", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        NSMenu.popUpContextMenu(m, with: e, for: self)
+    }
+}
+
+// פאנל שמותר לו לשבת מעל שורת התפריטים
+final class NotchPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+    override var canBecomeKey: Bool { false }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var panel: NSPanel!
+    let recorder = Recorder()
+    var bag = Set<AnyCancellable>()
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        panel = NotchPanel(contentRect: NSRect(origin: .zero, size: dotFrame),
+                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovable = false
+        let host = BubbleHost(rootView: BubbleView(r: recorder))
+        host.onClick = { [weak self] p in self?.clicked(p) }
+        host.sizingOptions = []   // החלון לא גדל לבד מהפינה, רק לפי setFrame
+        panel.contentView = host
+
+        // מיקום: צמוד לראש המסך, ממורכז על הנוטש
+        place(size: dotFrame)
+        panel.orderFrontRegardless()
+        // הפעלה/עצירה מבחוץ (קיצור מקלדת או בדיקות): התראת מערכת com.timmy.toggle
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.timmy.toggle"), object: nil, queue: .main) { [weak self] _ in
+            self?.recorder.toggle()
+        }
+
+        NotificationCenter.default.addObserver(forName: Notification.Name("timmy.needPermissions"), object: nil, queue: .main) { [weak self] _ in
+            self?.showOnboarding(step: 1)
+        }
+        if !UserDefaults.standard.bool(forKey: "onboarded") && !args.contains(where: { $0.hasPrefix("--demo") }) {
+            showOnboarding(step: nil)
+        }
+        if args.contains("--demo-hover") { hover.over = true }
+        if args.contains("--demo-onboarding") {
+            let st = args.firstIndex(of: "--demo-onboarding").flatMap { $0 + 1 < args.count ? Int(args[$0 + 1]) : nil } ?? 0
+            showOnboarding(step: st)
+        }
+
+        recorder.$phase.sink { [weak self] ph in
+            guard let self else { return }
+            let card = (ph == .recording || ph == .finishing)
+            self.place(size: card ? cardSize : dotFrame)
+        }.store(in: &bag)
+        if args.contains("--demo-card") || args.contains("--demo-finishing") || args.contains("--demo-thinking") { recorder.startDemo(finishing: args.contains("--demo-finishing")) }
+        if let i = args.firstIndex(of: "--demo-message"), i + 1 < args.count {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.recorder.phase = .message(args[i + 1]) }
+        }
+    }
+
+    // מעוגן למרכז העליון: הקצה העליון = ראש המסך
+    func place(size: NSSize) {
+        panel.setFrame(NSRect(x: (notch.centerX - size.width / 2).rounded(), y: notch.top - size.height,
+                              width: size.width, height: size.height), display: true)
+    }
+
+    func clicked(_ p: NSPoint) {
+        if recorder.isCard {
+            let flipped = CGPoint(x: p.x, y: panel.frame.height - p.y)
+            if stopRect.insetBy(dx: -6, dy: -6).contains(flipped) { recorder.toggle() }
+        } else {
+            recorder.toggle()
+        }
+    }
+
+    var onboardingWindow: NSWindow?
+    let onboarding = Onboarding()
+    @objc func openOnboarding() { showOnboarding(step: 1) }
+    func showOnboarding(step: Int?) {
+        if let step { onboarding.go(step) }
+        if onboardingWindow == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 460),
+                             styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+            w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
+            w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
+            w.backgroundColor = .black; w.appearance = NSAppearance(named: .darkAqua)
+            w.contentView = NSHostingView(rootView: OnboardingView(o: onboarding, close: { [weak w] in w?.close() }))
+            w.center(); onboardingWindow = w
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        onboardingWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func openFolder() {
+        try? FileManager.default.createDirectory(at: recDir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(recDir)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if recorder.phase == .recording {
+            Task { @MainActor in
+                await recorder.stop()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { NSApp.reply(toApplicationShouldTerminate: true) }
+            }
+            return .terminateLater
+        }
+        return .terminateNow
+    }
+}
+
+
+// MARK: - טימי: אונבורדינג הרשאות
+final class Onboarding: ObservableObject {
+    @Published var step: Int
+    @Published var screenOK = false
+    @Published var micOK = false
+    @Published var micDenied = false
+    @Published var chromeOK = false
+    private var timer: Timer?
+    init() {
+        step = UserDefaults.standard.integer(forKey: "onboardingStep")
+        refresh()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+    }
+    func refresh() {
+        let sc = CGPreflightScreenCaptureAccess()
+        let st = AVCaptureDevice.authorizationStatus(for: .audio)
+        let ch = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.Chrome") != nil
+        if sc != screenOK { screenOK = sc }
+        if (st == .authorized) != micOK { micOK = st == .authorized }
+        if (st == .denied || st == .restricted) != micDenied { micDenied = st == .denied || st == .restricted }
+        if ch != chromeOK { chromeOK = ch }
+    }
+    func go(_ s: Int) { step = s; UserDefaults.standard.set(s, forKey: "onboardingStep") }
+    func requestScreen() {
+        _ = CGRequestScreenCaptureAccess()
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+    }
+    func requestMic() {
+        if micDenied {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
+            return
+        }
+        AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async { self.refresh() } }
+    }
+    // הרשאת הקלטת מסך נכנסת לתוקף רק אחרי הפעלה מחדש של האפליקציה
+    func relaunch() {
+        go(step)
+        let path = Bundle.main.bundlePath
+        let t = Process(); t.executableURL = URL(fileURLWithPath: "/bin/sh")
+        t.arguments = ["-c", "sleep 1; open \"\(path)\""]
+        try? t.run()
+        NSApp.terminate(nil)
+    }
+    func finish() { UserDefaults.standard.set(true, forKey: "onboarded"); go(0) }
+}
+
+struct OnboardingView: View {
+    @ObservedObject var o: Onboarding
+    var close: () -> Void
+    let amber = Color(red: 1.0, green: 0.627, blue: 0.275)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // התקדמות
+            HStack(spacing: 6) {
+                ForEach(0..<5) { i in
+                    Capsule().fill(i <= o.step ? amber : Color.white.opacity(0.15)).frame(width: i == o.step ? 22 : 8, height: 6)
+                }
+            }
+            .padding(.top, 34)
+            .animation(.easeInOut(duration: 0.25), value: o.step)
+
+            Spacer(minLength: 18)
+            Group {
+                switch o.step {
+                case 0: welcome
+                case 1: screenStep
+                case 2: micStep
+                case 3: chromeStep
+                default: doneStep
+                }
+            }
+            .transition(.opacity)
+            Spacer(minLength: 18)
+        }
+        .padding(.horizontal, 40).padding(.bottom, 30)
+        .frame(width: 500, height: 460)
+        .background(Color.black)
+        .environment(\.layoutDirection, .rightToLeft)
+        .animation(.easeInOut(duration: 0.2), value: o.step)
+    }
+
+    var avatar: some View {
+        Group {
+            if let path = Bundle.main.path(forResource: "timmy", ofType: "png"), let img = NSImage(contentsOfFile: path) {
+                Image(nsImage: img).resizable().interpolation(.high).frame(width: 96, height: 96)
+                    .shadow(color: amber.opacity(0.35), radius: 16)
+            } else { avatarFallback }
+        }
+    }
+
+    var avatarFallback: some View {
+        ZStack {
+            Circle().fill(LinearGradient(colors: [amber, amber.opacity(0.6)], startPoint: .top, endPoint: .bottom))
+                .frame(width: 76, height: 76)
+                .shadow(color: amber.opacity(0.45), radius: 18)
+            Image(systemName: "waveform").font(.system(size: 32, weight: .semibold)).foregroundColor(.black)
+        }
+    }
+
+    func header(_ title: String, _ sub: String) -> some View {
+        VStack(spacing: 10) {
+            Text(title).font(.system(size: 24, weight: .bold)).foregroundColor(.white)
+            Text(sub).font(.system(size: 14)).foregroundColor(.white.opacity(0.65))
+                .multilineTextAlignment(.center).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    func primary(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 15, weight: .semibold)).foregroundColor(.black)
+                .frame(maxWidth: 260).padding(.vertical, 11)
+                .background(Capsule().fill(amber))
+        }.buttonStyle(.plain)
+    }
+
+    func secondary(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.7))
+                .padding(.vertical, 8).padding(.horizontal, 16)
+                .background(Capsule().fill(Color.white.opacity(0.08)))
+        }.buttonStyle(.plain)
+    }
+
+    func status(_ ok: Bool, _ okText: String, _ waitText: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "circle.dashed")
+                .foregroundColor(ok ? Color(red: 0.19, green: 0.82, blue: 0.35) : .white.opacity(0.4))
+            Text(ok ? okText : waitText).font(.system(size: 13, weight: .medium))
+                .foregroundColor(ok ? .white : .white.opacity(0.55))
+        }
+        .padding(.vertical, 9).padding(.horizontal, 14)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+    }
+
+    // לינק לאינסטגרם של היוצר
+    func instagramLink(_ label: String) -> some View {
+        Button(action: { NSWorkspace.shared.open(URL(string: "https://www.instagram.com/yaniv_shef/")!) }) {
+            HStack(spacing: 6) {
+                Image(systemName: "camera.circle.fill").font(.system(size: 14))
+                Text(label).font(.system(size: 12, weight: .medium))
+                Text("@yaniv_shef").font(.system(size: 12, weight: .semibold)).environment(\.layoutDirection, .leftToRight)
+            }
+            .foregroundColor(amber.opacity(0.9))
+            .padding(.vertical, 6).padding(.horizontal, 12)
+            .background(Capsule().stroke(amber.opacity(0.35), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+    }
+
+    var welcome: some View {
+        VStack(spacing: 22) {
+            avatar
+            header("היי, אני טימי", "אני מקליט את השיחות שלך בכרום (מיט, זום בדפדפן, וובינרים),\nמתמלל אותן בעברית בזמן אמת,\nורושם לך נקודות, סיכום ומשימות בסוף כל שיחה.")
+            Text("הכל קורה על המחשב שלך. בוא נסדר שתי הרשאות וזהו.")
+                .font(.system(size: 12)).foregroundColor(.white.opacity(0.45))
+            primary("בוא נתחיל") { o.go(1) }
+            instagramLink("נבנה על ידי")
+        }
+    }
+
+    var screenStep: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "rectangle.dashed.badge.record").font(.system(size: 40)).foregroundColor(amber)
+            header("הרשאה 1: הקול של כרום", "כדי לשמוע את הצד השני בשיחה, מק דורש הרשאת\n\"הקלטת מסך ושמע מערכת\". אני לא מצלם את המסך, רק מקשיב לכרום.")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("1.  לחץ \"פתח הגדרות\"").foregroundColor(.white.opacity(0.75))
+                Text("2.  הדלק את המתג ליד \"טימי\" (אם מבקשים, הכנס סיסמה)").foregroundColor(.white.opacity(0.75))
+                Text("3.  חזור לכאן ולחץ \"הפעל את טימי מחדש\"").foregroundColor(.white.opacity(0.75))
+            }.font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
+            status(o.screenOK, "ההרשאה פעילה", "עוד לא פעילה")
+            if o.screenOK {
+                primary("המשך") { o.go(2) }
+            } else {
+                HStack(spacing: 10) {
+                    primary("פתח הגדרות") { o.requestScreen() }
+                    secondary("הפעל את טימי מחדש") { o.relaunch() }
+                }
+            }
+        }
+    }
+
+    var micStep: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "mic.fill").font(.system(size: 40)).foregroundColor(amber)
+            header("הרשאה 2: הקול שלך", "ככה אדע מה אתה אמרת ומה הצד השני אמר,\nוהסיכום והמשימות ייצאו מדויקים.")
+            status(o.micOK, "המיקרופון מחובר", o.micDenied ? "המיקרופון חסום, צריך להדליק בהגדרות" : "עוד לא אושר")
+            if o.micOK {
+                primary("המשך") { o.go(3) }
+            } else {
+                primary(o.micDenied ? "פתח הגדרות מיקרופון" : "אשר מיקרופון") { o.requestMic() }
+                secondary("דלג, אקליט רק את כרום") { o.go(3) }
+            }
+        }
+    }
+
+    var chromeStep: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "globe").font(.system(size: 40)).foregroundColor(amber)
+            header("גוגל כרום", "אני מקשיב רק לכרום. שיחות במיט, בזום מהדפדפן או בכל אתר אחר בכרום.\nטיפ: עם אוזניות התמלול יוצא הכי נקי.")
+            status(o.chromeOK, "כרום מותקן", "כרום לא נמצא במחשב")
+            if o.chromeOK {
+                primary("המשך") { o.go(4) }
+            } else {
+                primary("הורד את כרום") { NSWorkspace.shared.open(URL(string: "https://www.google.com/chrome/")!) }
+                secondary("המשך בכל זאת") { o.go(4) }
+            }
+        }
+    }
+
+    var doneStep: some View {
+        VStack(spacing: 20) {
+            avatar
+            header("מוכן!", "אני מחכה לך למעלה באמצע המסך, ליד הנוטש.\nלחיצה עליי מתחילה הקלטה, ו\"עצור\" מסיים.\nבסוף אפתח לך את הסיכום בתיקייה.")
+            VStack(spacing: 8) {
+                status(o.screenOK, "קול של כרום: פעיל", "קול של כרום: לא פעיל")
+                status(o.micOK, "מיקרופון: פעיל", "מיקרופון: כבוי (רק הצד השני יוקלט)")
+            }
+            primary("יאללה") { o.finish(); close() }
+            instagramLink("טיפים ועדכונים באינסטגרם")
+        }
+    }
+}
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.accessory)
+app.run()

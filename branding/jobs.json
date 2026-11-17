@@ -1,0 +1,42 @@
+[
+ {
+  "label": "timmy-01-robot-headphones",
+  "model": "gpt-image-2-5-sunburst-text-to-image",
+  "input": {
+   "prompt": "macOS app icon for 'Timmy', a friendly AI assistant that records Google Meet calls and transcribes them in Hebrew. Big Sur style rounded-square (squircle) icon tile with generous padding, solid deep black tile with subtle depth and a soft inner highlight, warm amber (#FFA046) as the only accent color, premium Apple-quality soft 3D render, gentle studio lighting, crisp bold silhouette that stays readable at 32 pixels. Subject: a small rounded robot head with two big glowing amber oval eyes, wearing chunky black over-ear headphones with amber ear cushions, a tiny amber sound wave beside it. Centered. No text, no letters, no numbers, no watermark, original non-infringing character. Transparent outside the rounded tile, no background, isolated icon.",
+   "aspect_ratio": "1:1",
+   "resolution": "1K",
+   "background": "transparent"
+  }
+ },
+ {
+  "label": "timmy-02-blob-wave-smile",
+  "model": "gpt-image-2-5-sunburst-text-to-image",
+  "input": {
+   "prompt": "macOS app icon for 'Timmy', a friendly AI assistant that records Google Meet calls and transcribes them in Hebrew. Big Sur style rounded-square (squircle) icon tile with generous padding, solid deep black tile with subtle depth and a soft inner highlight, warm amber (#FFA046) as the only accent color, premium Apple-quality soft 3D render, gentle studio lighting, crisp bold silhouette that stays readable at 32 pixels. Subject: a soft glossy black blob character with two small amber dot eyes and a smile drawn as a short amber audio waveform, slightly tilted head, cheerful and calm. Centered. No text, no letters, no numbers, no watermark, original non-infringing character. Transparent outside the rounded tile, no background, isolated icon.",
+   "aspect_ratio": "1:1",
+   "resolution": "1K",
+   "background": "transparent"
+  }
+ },
+ {
+  "label": "timmy-03-mic-character",
+  "model": "gpt-image-2-5-sunburst-text-to-image",
+  "input": {
+   "prompt": "macOS app icon for 'Timmy', a friendly AI assistant that records Google Meet calls and transcribes them in Hebrew. Big Sur style rounded-square (squircle) icon tile with generous padding, solid deep black tile with subtle depth and a soft inner highlight, warm amber (#FFA046) as the only accent color, premium Apple-quality soft 3D render, gentle studio lighting, crisp bold silhouette that stays readable at 32 pixels. Subject: a cute capsule microphone character with a friendly face, its grille glowing warm amber, tiny arm waving hello. Centered. No text, no letters, no numbers, no watermark, original non-infringing character. Transparent outside the rounded tile, no background, isolated icon.",
+   "aspect_ratio": "1:1",
+   "resolution": "1K",
+   "background": "transparent"
+  }
+ },
+ {
+  "label": "timmy-04-island-face",
+  "model": "gpt-image-2-5-sunburst-text-to-image",
+  "input": {
+   "prompt": "macOS app icon for 'Timmy', a friendly AI assistant that records Google Meet calls and transcribes them in Hebrew. Big Sur style rounded-square (squircle) icon tile with generous padding, solid deep black tile with subtle depth and a soft inner highlight, warm amber (#FFA046) as the only accent color, premium Apple-quality soft 3D render, gentle studio lighting, crisp bold silhouette that stays readable at 32 pixels. Subject: a minimal mascot shaped like a black rounded pill (like a phone's dynamic island) with two amber eyes and an audio waveform as its mouth, glowing softly on the dark tile. Centered. No text, no letters, no numbers, no watermark, original non-infringing character. Transparent outside the rounded tile, no background, isolated icon.",
+   "aspect_ratio": "1:1",
+   "resolution": "1K",
+   "background": "transparent"
+  }
+ }
+]
