@@ -2943,18 +2943,19 @@ actor Greenolink {
         if h.statusCode == 401 { throw glNeedReconnect }
         ready = true
     }
-    private func rpc(_ method: String, _ params: [String: Any], retry: Bool = true) async throws -> [String: Any] {
+    // ניסיון חוזר נפרד לכל מקרה: טוקן שפג (401) וסשן שפג בשרת (404) יכולים לקרות ביחד באותה בקשה
+    private func rpc(_ method: String, _ params: [String: Any], retryAuth: Bool = true, retrySession: Bool = true) async throws -> [String: Any] {
         if method != "initialize" { try await ensureSession() }
         rpcID += 1
         let id = rpcID
         let (d, h) = try await post(["jsonrpc": "2.0", "id": id, "method": method, "params": params], token: try await accessToken())
         if h.statusCode == 401 {
-            guard retry else { throw glNeedReconnect }
+            guard retryAuth else { throw glNeedReconnect }
             _ = try await accessToken(force: true)
-            return try await rpc(method, params, retry: false)
+            return try await rpc(method, params, retryAuth: false, retrySession: retrySession)
         }
-        if h.statusCode == 404 && sessionID != nil && retry {   // הסשן פג בשרת: מתחילים חדש
-            resetSession(); return try await rpc(method, params, retry: false)
+        if h.statusCode == 404 && sessionID != nil && retrySession {   // הסשן פג בשרת: מתחילים חדש
+            resetSession(); return try await rpc(method, params, retryAuth: retryAuth, retrySession: false)
         }
         guard (200...299).contains(h.statusCode) else { throw GLError(msg: "Greenolink החזיר שגיאה (\(h.statusCode)). נסה שוב בעוד רגע") }
         if method == "initialize", let sid = h.value(forHTTPHeaderField: "Mcp-Session-Id"), !sid.isEmpty { sessionID = sid }
