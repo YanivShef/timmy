@@ -793,7 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.showOnboarding(step: 1)
         }
         NotificationCenter.default.addObserver(forName: Notification.Name("timmy.diskFull"), object: nil, queue: .main) { [weak self] _ in
-            self?.showOnboarding(step: 4)
+            self?.showOnboarding(step: 5)
         }
         if !UserDefaults.standard.bool(forKey: "onboarded") && !args.contains(where: { $0.hasPrefix("--demo") }) {
             showOnboarding(step: nil)
@@ -855,7 +855,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // פתיחה של האפליקציה כשהיא כבר רצה (מ-Spotlight / Launchpad / תיקיית היישומים): מראים את מסך ההגדרות
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showOnboarding(step: UserDefaults.standard.bool(forKey: "onboarded") ? 5 : nil)
+        showOnboarding(step: UserDefaults.standard.bool(forKey: "onboarded") ? 6 : nil)
         return true
     }
 
@@ -889,6 +889,8 @@ final class Onboarding: ObservableObject {
     @Published var folder = recDir.path
     @Published var freeGB: Double = 0
     @Published var launchAtLogin = false
+    enum ClaudeState { case unknown, checking, ok, notInstalled, notLoggedIn }
+    @Published var claude: ClaudeState = .unknown
     private var timer: Timer?
     init() {
         step = UserDefaults.standard.integer(forKey: "onboardingStep")
@@ -910,6 +912,49 @@ final class Onboarding: ObservableObject {
         let l = SMAppService.mainApp.status == .enabled
         if l != launchAtLogin { launchAtLogin = l }
     }
+    // Claude Code: איפה הוא מותקן
+    func claudePath() -> String? {
+        var cands: [String] = []
+        if let p = loadConfig()["claude_path"] as? String, !p.isEmpty { cands.append(p) }
+        cands += [home.path + "/.claude/local/claude", home.path + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+        if let vers = try? FileManager.default.contentsOfDirectory(atPath: home.path + "/.nvm/versions/node") {
+            cands += vers.sorted(by: >).map { home.path + "/.nvm/versions/node/\($0)/bin/claude" }
+        }
+        return cands.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+    // בדיקה אמיתית: שאלה קטנה ל-Claude. מצליח = מחובר לחשבון
+    func checkClaude() {
+        guard let path = claudePath() else { claude = .notInstalled; return }
+        saveConfig(["claude_path": path])
+        claude = .checking
+        DispatchQueue.global().async {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: path)
+            p.arguments = ["-p", "--model", "haiku", "ענה במילה אחת בלבד: מחובר"]
+            p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = (path as NSString).deletingLastPathComponent + ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+            p.environment = env
+            let out = Pipe(); p.standardOutput = out; p.standardError = Pipe(); p.standardInput = FileHandle.nullDevice
+            var ok = false
+            if (try? p.run()) != nil {
+                let deadline = Date().addingTimeInterval(45)
+                while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
+                if p.isRunning { p.terminate() }
+                else {
+                    let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    ok = p.terminationStatus == 0 && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }
+            }
+            DispatchQueue.main.async { self.claude = ok ? .ok : .notLoggedIn }
+        }
+    }
+    // פותח טרמינל עם claude, כדי שהמשתמש יתחבר לחשבון
+    func openClaudeLogin() {
+        guard let path = claudePath() else { return }
+        let script = "tell application \"Terminal\"\nactivate\ndo script \"'\(path)'\"\nend tell"
+        NSAppleScript(source: script)?.executeAndReturnError(nil)
+    }
+
     func chooseFolder() {
         let p = NSOpenPanel()
         p.canChooseDirectories = true; p.canChooseFiles = false; p.canCreateDirectories = true
@@ -966,7 +1011,7 @@ struct OnboardingView: View {
         VStack(spacing: 0) {
             // התקדמות
             HStack(spacing: 6) {
-                ForEach(0..<6) { i in
+                ForEach(0..<7) { i in
                     Capsule().fill(i <= o.step ? amber : Color.white.opacity(0.15)).frame(width: i == o.step ? 22 : 8, height: 6)
                 }
             }
@@ -980,7 +1025,8 @@ struct OnboardingView: View {
                 case 1: screenStep
                 case 2: micStep
                 case 3: chromeStep
-                case 4: folderStep
+                case 4: claudeStep
+                case 5: folderStep
                 default: doneStep
                 }
             }
@@ -1129,6 +1175,43 @@ struct OnboardingView: View {
         }
     }
 
+    var claudeStep: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "sparkles").font(.system(size: 40)).foregroundColor(amber)
+            header("החיבור ל-Claude", "את הנקודות, הסיכום והמשימות כותב Claude,\nדרך Claude Code שמותקן אצלך ועם המנוי שלך. בלי מפתחות ובלי הגדרות.\nרק הטקסט של השיחה נשלח, לא ההקלטה.")
+            switch o.claude {
+            case .unknown, .checking:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("בודק את החיבור ל-Claude…").font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.7))
+                }
+                .padding(.vertical, 9).padding(.horizontal, 14)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+            case .ok:
+                status(true, "מחובר ל-Claude", "")
+                primary("המשך") { o.go(5) }
+            case .notInstalled:
+                status(false, "", "Claude Code לא נמצא במחשב", critical: true)
+                Text("בלי Claude אקליט ואתמלל, אבל בלי נקודות וסיכום.").font(.system(size: 12)).foregroundColor(.white.opacity(0.5))
+                HStack(spacing: 10) {
+                    primary("איך מתקינים") { NSWorkspace.shared.open(URL(string: "https://claude.com/claude-code")!) }
+                    secondary("בדוק שוב") { o.checkClaude() }
+                }
+                secondary("המשך בלי סיכומים") { o.go(5) }
+            case .notLoggedIn:
+                status(false, "", "Claude Code מותקן, אבל לא מחובר לחשבון", critical: true)
+                Text("לחץ \"התחבר\", ייפתח טרמינל עם Claude. התחבר לחשבון שלך, ואז חזור לכאן ולחץ \"בדוק שוב\".")
+                    .font(.system(size: 12)).foregroundColor(.white.opacity(0.6)).multilineTextAlignment(.center)
+                HStack(spacing: 10) {
+                    primary("התחבר") { o.openClaudeLogin() }
+                    secondary("בדוק שוב") { o.checkClaude() }
+                }
+                secondary("המשך בלי סיכומים") { o.go(5) }
+            }
+        }
+        .onAppear { if o.claude == .unknown || o.claude == .notInstalled { o.checkClaude() } }
+    }
+
     var shortFolder: String { FileManager.default.displayName(atPath: o.folder) }
     var parentFolder: String { FileManager.default.displayName(atPath: (o.folder as NSString).deletingLastPathComponent) }
     var spaceOK: Bool { o.freeGB >= 2 }
@@ -1152,7 +1235,7 @@ struct OnboardingView: View {
                                   : String(format: "רק %.1f GB פנויים: מספיק לכמה שיחות, כדאי לפנות מקום", o.freeGB),
                    critical: o.freeGB < 0.5)
             HStack(spacing: 10) {
-                primary("המשך") { o.go(5) }
+                primary("המשך") { o.go(6) }
                 secondary("בחר תיקייה אחרת") { o.chooseFolder() }
             }
         }
@@ -1165,7 +1248,9 @@ struct OnboardingView: View {
             VStack(spacing: 8) {
                 status(o.screenOK, "קול של כרום: פעיל", "קול של כרום: לא פעיל")
                 status(o.micOK, "מיקרופון: פעיל", "מיקרופון: כבוי (רק הצד השני יוקלט)")
-                Button(action: { o.go(4) }) { status(spaceOK, "שמירה ב: " + shortFolder, "שמירה ב: " + shortFolder + " (מעט מקום)") }
+                Button(action: { o.go(4) }) { status(o.claude == .ok, "Claude: מחובר (נקודות וסיכומים)", "Claude: לא מחובר (רק תמלול)") }
+                    .buttonStyle(.plain)
+                Button(action: { o.go(5) }) { status(spaceOK, "שמירה ב: " + shortFolder, "שמירה ב: " + shortFolder + " (מעט מקום)") }
                     .buttonStyle(.plain)
                 Toggle(isOn: Binding(get: { o.launchAtLogin }, set: { o.setLaunchAtLogin($0) })) {
                     Text("הפעל את טימי כשהמחשב נדלק").font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.85))
