@@ -70,7 +70,7 @@ import re as _re
 # מילות מילוי שתמיד נזרקות כשהן כל השורה ("אין" ו"אוקיי" הן תשובות אמיתיות, לא כאן)
 FILLERS = {"אה", "אהה", "אממ", "אמ", "הממ", "ממ", "נו"}
 # משפטי "מלאי" ש-Whisper ממציא על מוזיקה/רעש/שקט
-STOCK = {"תודה רבה", "בבקשה", "סליחה", "תודה שצפיתם", "כתוביות", "תודה", "אוקיי"}
+STOCK = {"תודה רבה", "בבקשה", "סליחה", "תודה שצפיתם", "כתוביות"}
 NEVER = ("היושב ראש", "היושב-ראש", "חברי הכנסת", "תודה שצפיתם", "כתוביות")
 BIDI = _re.compile("[‎‏‪-‮⁦-⁩]")
 def _norm(w): return _re.sub(r"[^\w]", "", w)
@@ -100,7 +100,8 @@ def clean(t):
 def tr(a, partial=False):
     """מחזיר (טקסט, אמין, פרטים). בתמלול ביניים טקסט לא אמין לא מוצג (במקומו 'מתמלל');
     בשורה סופית פרטים משמשים לסינון הזיות (final_ok)."""
-    kw = {"temperature": (0.0,)} if partial else {}   # בתמלול ביניים בלי ניסיונות חוזרים בטמפרטורה גבוהה (נתקע על מוזיקה)
+    # ביניים: בלי ניסיונות חוזרים; סופי: עד 0.2 (מעל זה final_ok זורק ממילא, אז ניסיונות נוספים רק מעכבים)
+    kw = {"temperature": (0.0,) if partial else (0.0, 0.2)}
     r = mlx_whisper.transcribe(a, path_or_hf_repo=MODEL, language="he", condition_on_previous_text=False, verbose=None, **kw)
     raw = r["segments"]
     segs = [s for s in raw if s.get("avg_logprob", 0) > -1.0 and s.get("compression_ratio", 1) < 2.4]
@@ -231,7 +232,7 @@ class Chan:
             emit({"type": "partial", "text": "", "speaker": "me"}); return
         t, _, info = tr(a); sec = at / SR
         if t and not final_ok(t, info): t = ""
-        if t and len(t.split()) <= 3:
+        if t and len(t.split()) <= 3 and info["min_lp"] < -0.65:   # רק חזרה "חלשה" נחשבת הזיה; "כן" אמיתי פעמיים נשאר
             key = " ".join(_norm(w) for w in t.split())
             if any(spk == self.ch and sec - t0 < 30 and " ".join(_norm(w) for w in tx.split()) == key for (t0, spk, tx) in entries[-6:]):
                 t = ""   # אותה שורה קצרה שוב ושוב = הזיה
