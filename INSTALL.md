@@ -85,4 +85,5 @@ bash ~/Timmy/mac/install.sh --name "<שם>" --about "<עסק>" --people "<שם1,
 ## כשהמשתמש מבקש לשנות את טימי בהמשך
 - **שינוי בנקודות או בסיכומים** ("טימי, תכתוב סיכומים קצרים יותר", "תוסיף סעיף החלטות"): הוסף את ההוראה כמחרוזת לרשימה `custom_instructions` ב-`~/Library/Application Support/Timmy/config.json`. אל תמחק הוראות קיימות אלא אם התבקשת. כדי להחיל את ההוראות על סיכום קיים:
   `"$HOME/Library/Application Support/Timmy/venv/bin/python" "$HOME/Library/Application Support/Timmy/live.py" --restyle "<נתיב לקובץ הסיכום.md>"`
+- **צבע האפליקציה** ("טימי, תחליף לצבע כחול"): השדה `accent_color` (קוד hex, למשל `#3B82F6`) באותו קובץ. ברירת המחדל `#FFA046`. השינוי חל אחרי הפעלה מחדש של טימי; מתוך חלון "שפר את טימי" הוא חל מיד.
 - **שם, תיאור העסק או לקוחות:** השדות `owner_name`, `owner_description` ו-`people` באותו קובץ. השינוי חל מהשיחה הבאה, בלי צורך בהפעלה מחדש.

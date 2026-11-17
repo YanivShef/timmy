@@ -1,0 +1,5 @@
+#!/bin/bash
+# wrapper: passes stdin to real claude, logs raw stdout
+id=$(date +%s%N)-$$
+cat > /Users/yaniv/Projects/timmy/qa-improve/tee/$id.in
+/Users/yaniv/.nvm/versions/node/v22.12.0/bin/claude "$@" < /Users/yaniv/Projects/timmy/qa-improve/tee/$id.in | tee /Users/yaniv/Projects/timmy/qa-improve/tee/$id.out

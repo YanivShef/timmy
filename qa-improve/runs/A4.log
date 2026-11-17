@@ -1,0 +1,30 @@
+== A4  (6s) rc=0 stdout={"type": "restyled", "txt": "/Users/yaniv/Projects/timmy/qa-improve/runs/A4/out/2026-11-10 14-30 דני - תמחור אתר.md", "changed": true} stderr=
+title ok: True | # Website Pricing for a Flower Shop
+date line exact: True
+transcript line exact: True | last nonempty is transcript line: True
+em dash present: False
+changed: True
+----- NEW -----
+# Website Pricing for a Flower Shop
+
+**תאריך:** 2026-11-10 14:30 · **אורך:** 12:41 דק׳ · **עם:** דני
+
+## Summary
+
+Danny has run a flower shop in Holon for 8 years and has no website. Everything currently goes through the phone. Yaniv proposed a site with online ordering and a WhatsApp integration for 6,500 ₪. Danny said that was a lot to pay at once and asked to split it. Yaniv agreed to three payments. The site will go live by the end of December.
+
+## Key Points
+
+- Danny's shop in Holon has been open for 8 years
+- He wants customers to order a bouquet online, with each order sending him a WhatsApp message
+- Price: 6,500 ₪, paid in three installments
+- Deadline: end of December
+- Danny will send photos of bouquets by Thursday
+
+## Action Items
+
+- [ ] Danny: send photos of bouquets by Thursday
+- [ ] Yaniv: send a formal price quote tomorrow
+
+תמלול מלא: 2026-11-10 14-30 דני - תמחור אתר - תמלול.txt
+

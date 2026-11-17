@@ -18,7 +18,11 @@ let home = FileManager.default.homeDirectoryForCurrentUser
 // בלעדיו שורה שמתחילה באנגלית או במספר ("Claude Code זה…") מוצגת משמאל לימין והסדר מתבלגן.
 func he(_ s: String) -> String { "\u{200F}" + s.replacingOccurrences(of: "\n", with: "\n\u{200F}") }
 // הכל מותקן ב-~/Library/Application Support/Timmy (ע"י install.sh)
-let appDir = home.appendingPathComponent("Library/Application Support/Timmy")
+// TIMMY_APP_DIR: תיקיית הגדרות חלופית (לבדיקות, בלי לגעת בהתקנה האמיתית)
+let appDir: URL = {
+    if let d = ProcessInfo.processInfo.environment["TIMMY_APP_DIR"], !d.isEmpty { return URL(fileURLWithPath: d) }
+    return home.appendingPathComponent("Library/Application Support/Timmy")
+}()
 let configURL = appDir.appendingPathComponent("config.json")
 func loadConfig() -> [String: Any] {
     guard let d = try? Data(contentsOf: configURL),
@@ -317,7 +321,44 @@ func argValue(_ k: String) -> Double? {
 // MARK: עיצוב A: "Dynamic Island" מחובר לנוטש — קפסולה שחורה שיוצאת מהנוטש ונפתחת לכרטיס כלפי מטה
 
 let recRed = Color(red: 1.0, green: 0.27, blue: 0.27)
-let amber = Color(red: 1.0, green: 0.627, blue: 0.275)
+// צבע ההדגשה של טימי. ברירת מחדל אמבר; אפשר לשנות דרך "שפר את טימי" ("תחליף לצבע כחול"), נשמר ב-config: accent_color
+let defaultAccent = "#FFA046"
+final class Theme {
+    static var accentHex: String = (loadConfig()["accent_color"] as? String) ?? defaultAccent
+    static func set(_ hex: String?) {
+        accentHex = hex ?? defaultAccent
+        saveConfig(["accent_color": accentHex])
+        NotificationCenter.default.post(name: Notification.Name("timmy.themeChanged"), object: nil)
+    }
+}
+func colorFromHex(_ hex: String) -> Color {
+    var h = hex.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: "")
+    if h.count == 3 { h = h.map { "\($0)\($0)" }.joined() }
+    guard h.count == 6, let v = UInt32(h, radix: 16) else { return Color(red: 1.0, green: 0.627, blue: 0.275) }
+    return Color(red: Double((v >> 16) & 0xFF) / 255, green: Double((v >> 8) & 0xFF) / 255, blue: Double(v & 0xFF) / 255)
+}
+var amber: Color { colorFromHex(Theme.accentHex) }
+
+// זיהוי הוראת צבע ("תחליף לצבע כחול", "#1E90FF", "תחזיר לכתום"). מחזיר hex, או "reset", או nil אם זו לא הוראת צבע
+let colorNames: [(String, String)] = [
+    ("תכלת", "#38BDF8"), ("טורקיז", "#14B8A6"), ("כחול", "#3B82F6"), ("נייבי", "#1E3A8A"),
+    ("ירוק", "#22C55E"), ("מנטה", "#34D399"), ("ליים", "#A3E635"), ("צהוב", "#FACC15"),
+    ("זהב", "#D4AF37"), ("זהוב", "#D4AF37"), ("אדום", "#EF4444"), ("בורדו", "#9F1239"),
+    ("ורוד", "#EC4899"), ("סגול", "#A855F7"), ("לילך", "#C4B5FD"), ("לבן", "#F5F5F5"), ("אפור", "#9CA3AF"),
+    ("blue", "#3B82F6"), ("green", "#22C55E"), ("purple", "#A855F7"), ("pink", "#EC4899"), ("red", "#EF4444"),
+    ("yellow", "#FACC15"), ("teal", "#14B8A6"), ("gold", "#D4AF37")]
+func isColorInstruction(_ t: String) -> Bool {
+    let l = t.lowercased()
+    return l.contains("צבע") || l.contains("color") || l.contains("colour") || l.range(of: "#[0-9a-f]{3,6}", options: .regularExpression) != nil
+}
+func parseColor(_ t: String) -> String? {
+    let l = t.lowercased()
+    let verb = l.contains("תחליף") || l.contains("תשנה") || l.contains("תעשה") || l.contains("שנה") || l.contains("החלף")
+    guard isColorInstruction(t) || (verb && colorNames.contains(where: { l.contains($0.0) })) else { return nil }
+    if l.contains("כתום") || l.contains("מקורי") || l.contains("ברירת מחדל") || l.contains("orange") { return "reset" }
+    if let r = l.range(of: "#[0-9a-f]{6}|#[0-9a-f]{3}", options: .regularExpression) { return String(l[r]).uppercased() }
+    return colorNames.first(where: { l.contains($0.0) })?.1
+}
 let okGreen = Color(red: 0.188, green: 0.82, blue: 0.345)   // #30D158
 
 // מידות הנוטש מהמסך בזמן ריצה; במסך בלי נוטש: אותה צורה במרכז העליון בגובה 32
@@ -487,6 +528,7 @@ struct BubbleView: View {
         }
         .animation(island, value: r.isCard)
         .environment(\.colorScheme, .dark)
+        .id(Theme.accentHex)
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .top)
     }
 
@@ -673,7 +715,7 @@ struct BubbleView: View {
         guard show else { return Text("") }
         return Text(sp == "me" ? "אני  " : "צד שני  ")
             .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(sp == "me" ? Color(red: 1.0, green: 0.627, blue: 0.275) : .white.opacity(0.5))
+            .foregroundColor(sp == "me" ? amber : .white.opacity(0.5))
     }
 
     var transcript: some View {
@@ -797,6 +839,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: Notification.Name("timmy.needPermissions"), object: nil, queue: .main) { [weak self] _ in
             self?.showOnboarding(step: 1)
         }
+        // שינוי צבע: מרעננים את כל המסכים
+        NotificationCenter.default.addObserver(forName: Notification.Name("timmy.themeChanged"), object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.recorder.objectWillChange.send(); self.onboarding.objectWillChange.send(); self.improve.objectWillChange.send()
+            hover.objectWillChange.send()
+        }
         NotificationCenter.default.addObserver(forName: Notification.Name("timmy.diskFull"), object: nil, queue: .main) { [weak self] _ in
             self?.showOnboarding(step: 5)
         }
@@ -908,15 +956,49 @@ final class ImproveModel: ObservableObject {
     @Published var items: [String] = []
     @Published var draft = ""
     @Published var status: Status = .idle
-    let examples = ["נקודות קצרות יותר, עד 8 מילים", "תוסיף סעיף \"החלטות\" בטבלה: נושא | מה סוכם | אחראי",
+    let examples = ["תחליף את הצבע לכחול", "נקודות קצרות יותר, עד 8 מילים", "תוסיף סעיף \"החלטות\" בטבלה: נושא | מה סוכם | אחראי",
                     "תוסיף סעיף \"צעדים הבאים ללקוח\"", "תכתוב את הסיכום בגוף ראשון, כאילו אני כתבתי",
                     "בסוף תכתוב הודעת וואטסאפ קצרה ללקוח עם סיכום השיחה", "בלי אימוג'י ובלי הדגשות"]
     func reload() { items = (loadConfig()["custom_instructions"] as? [String]) ?? [] }
     private func save() { saveConfig(["custom_instructions": items]) }
+    @Published var accent = Theme.accentHex
     func add(_ text: String? = nil) {
         let t = (text ?? draft).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, !items.contains(t) else { return }
+        guard !t.isEmpty else { return }
+        // הוראת צבע: משנה את צבע האפליקציה מיד (הגדרת אפליקציה, לא הוראה לסיכום)
+        if let c = parseColor(t) {
+            applyColor(c == "reset" ? nil : c); if text == nil { draft = "" }
+            status = .done(c == "reset" ? "הצבע חזר לכתום" : "הצבע של טימי עודכן")
+            return
+        }
+        if isColorInstruction(t) {   // ניסוח יצירתי ("הצבע של פייסבוק"): Claude מתרגם לצבע
+            askClaudeForColor(t); if text == nil { draft = "" }; return
+        }
+        guard !items.contains(t) else { return }
         items.append(t); save(); if text == nil { draft = "" }
+    }
+    func applyColor(_ hex: String?) { Theme.set(hex); accent = Theme.accentHex }
+    func askClaudeForColor(_ t: String) {
+        guard let claude = Onboarding.shared?.claudePath() else { status = .failed("לא הבנתי איזה צבע. נסה למשל: תחליף לצבע כחול"); return }
+        status = .working
+        DispatchQueue.global().async {
+            let p = Process(); p.executableURL = URL(fileURLWithPath: claude)
+            p.arguments = ["-p", "--model", "haiku", "המשתמש ביקש לשנות את צבע ההדגשה של אפליקציה כהה: \"\(t)\". החזר רק קוד צבע hex אחד בפורמט #RRGGBB, שנראה טוב על רקע שחור, בלי שום טקסט נוסף."]
+            p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            let out = Pipe(); p.standardOutput = out; p.standardError = Pipe(); p.standardInput = FileHandle.nullDevice
+            var hex: String?
+            if (try? p.run()) != nil {
+                let deadline = Date().addingTimeInterval(45)
+                while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
+                if p.isRunning { p.terminate() }
+                let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                if let r = text.range(of: "#[0-9A-Fa-f]{6}", options: .regularExpression) { hex = String(text[r]).uppercased() }
+            }
+            DispatchQueue.main.async {
+                if let hex { self.applyColor(hex); self.status = .done("הצבע של טימי עודכן") }
+                else { self.status = .failed("לא הבנתי איזה צבע. נסה למשל: תחליף לצבע כחול") }
+            }
+        }
     }
     func remove(_ i: Int) { guard items.indices.contains(i) else { return }; items.remove(at: i); save() }
     // הסיכום האחרון בתיקיית ההקלטות
@@ -942,7 +1024,7 @@ final class ImproveModel: ObservableObject {
             let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             DispatchQueue.main.async {
                 if text.contains("\"changed\": true") {
-                    self.status = .done(md.deletingPathExtension().lastPathComponent)
+                    self.status = .done("שופר: " + md.deletingPathExtension().lastPathComponent)
                     NSWorkspace.shared.activateFileViewerSelecting([md])
                 } else { self.status = .failed("לא הצלחתי לשפר, בדוק שה-Claude מחובר") }
             }
@@ -953,7 +1035,6 @@ final class ImproveModel: ObservableObject {
 
 struct ImproveView: View {
     @ObservedObject var m: ImproveModel
-    let amber = Color(red: 1.0, green: 0.627, blue: 0.275)
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 12) {
@@ -982,6 +1063,22 @@ struct ImproveView: View {
             // דוגמאות
             Text("רעיונות").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
             FlowChips(items: m.examples.filter { !m.items.contains($0) }) { m.add($0) }
+
+            // צבע האפליקציה
+            HStack(spacing: 10) {
+                Circle().fill(colorFromHex(m.accent)).frame(width: 18, height: 18)
+                    .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1))
+                Text(he("צבע האפליקציה")).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.85))
+                Spacer()
+                if m.accent != defaultAccent {
+                    Button(action: { m.applyColor(nil); m.status = .done("הצבע חזר לכתום") }) {
+                        Text(he("חזור לכתום")).font(.system(size: 12)).foregroundColor(.white.opacity(0.7))
+                            .padding(.vertical, 5).padding(.horizontal, 10).background(Capsule().fill(Color.white.opacity(0.08)))
+                    }.buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 8).padding(.horizontal, 12)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.05)))
 
             // ההוראות השמורות
             Text("ההוראות שלך (\(m.items.count))").font(.system(size: 11, weight: .semibold)).foregroundColor(.white.opacity(0.45))
@@ -1020,7 +1117,7 @@ struct ImproveView: View {
                 }
                 .buttonStyle(.plain).disabled(m.status == .working)
                 switch m.status {
-                case .done(let name): Text("✓ שופר: \(name)").font(.system(size: 12)).foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35)).lineLimit(1)
+                case .done(let name): Text(he("✓ " + name)).font(.system(size: 12)).foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35)).lineLimit(1)
                 case .failed(let why): Text(he(why)).font(.system(size: 12)).foregroundColor(Color(red: 1, green: 0.4, blue: 0.4))
                 default: Text("הנקודות החיות והסיכומים של השיחות הבאות כבר ייכתבו לפי ההוראות.").font(.system(size: 11)).foregroundColor(.white.opacity(0.4))
                 }
@@ -1066,8 +1163,10 @@ final class Onboarding: ObservableObject {
     enum ClaudeState { case unknown, checking, ok, notInstalled, notLoggedIn }
     @Published var claude: ClaudeState = .unknown
     private var timer: Timer?
+    static weak var shared: Onboarding?
     init() {
         step = UserDefaults.standard.integer(forKey: "onboardingStep")
+        defer { Onboarding.shared = self }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
     }
@@ -1181,7 +1280,6 @@ final class Onboarding: ObservableObject {
 struct OnboardingView: View {
     @ObservedObject var o: Onboarding
     var close: () -> Void
-    let amber = Color(red: 1.0, green: 0.627, blue: 0.275)
 
     var body: some View {
         VStack(spacing: 0) {
