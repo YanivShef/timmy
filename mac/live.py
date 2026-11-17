@@ -383,6 +383,12 @@ try:
         with open(os.path.expanduser(CFG["people_file"]), encoding="utf-8") as f:
             people += [l.strip() for l in f if l.strip()]
 except Exception: pass
+# מקורות שמות נוספים: קבצים עם ביטוי רגולרי (למשל קובץ נתונים של CRM). config: people_sources = [{"path": ..., "regex": ...}]
+for src in CFG.get("people_sources", []) or []:
+    try:
+        with open(os.path.expanduser(src["path"]), encoding="utf-8") as f:
+            people += [m.strip() for m in re.findall(src["regex"], f.read()) if m.strip()]
+    except Exception: pass
 notes = []
 try:
     for f in (os.listdir(CLIENTS_DIR) if CLIENTS_DIR else []):

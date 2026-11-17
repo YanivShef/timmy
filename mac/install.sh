@@ -12,7 +12,7 @@ APP_DIR="$HOME/Library/Application Support/Timmy"
 MODEL="mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx"
 PY_VERSION="3.12"
 
-NAME=""; ABOUT=""; PEOPLE=""; OUTDIR="$HOME/Documents/טימי - הקלטות"; VENV=""
+NAME=""; ABOUT=""; PEOPLE=""; OUTDIR="$HOME/Documents/טימי - הקלטות"; VENV=""; SHORTCUTS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name) NAME="$2"; shift 2;;
@@ -20,6 +20,7 @@ while [[ $# -gt 0 ]]; do
     --people) PEOPLE="$2"; shift 2;;
     --output-dir) OUTDIR="$2"; shift 2;;
     --venv) VENV="$2"; shift 2;;
+    --no-shortcuts) SHORTCUTS=0; shift;;
     *) echo "פרמטר לא מוכר: $1"; exit 1;;
   esac
 done
@@ -189,6 +190,22 @@ PLIST
 xattr -cr "$APP" 2>/dev/null || true
 codesign --force --deep -s - "$APP" >/dev/null 2>&1 || fail "חתימת האפליקציה נכשלה."
 ok "מותקן: $APP"
+
+# ---------------------------------------------------------------------------
+if [[ "$SHORTCUTS" == "1" ]]; then
+  step "אייקון ב-Dock ובשולחן העבודה"
+  # Dock: רק אם עוד לא שם
+  if ! defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "com.timmy.recorder\|טימי.app"; then
+    APP_URL="$(/usr/bin/python3 -c 'import sys,urllib.parse; print("file://" + urllib.parse.quote(sys.argv[1]) + "/")' "$APP")"
+    defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>$APP_URL</string><key>_CFURLStringType</key><integer>15</integer></dict></dict></dict>" \
+      && killall Dock 2>/dev/null || true
+  fi
+  ok "נוסף ל-Dock"
+  # קיצור דרך בשולחן העבודה
+  # קישור סימבולי (לא צריך הרשאה לשלוט ב-Finder); מוצג עם האייקון של טימי
+  [[ -e "$HOME/Desktop/טימי" ]] || ln -s "$APP" "$HOME/Desktop/טימי" 2>/dev/null || true
+  ok "קיצור דרך בשולחן העבודה"
+fi
 
 # ---------------------------------------------------------------------------
 step "בדיקה אחרונה"
