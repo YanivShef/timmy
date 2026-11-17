@@ -13,6 +13,10 @@ enum Phase: Equatable { case idle, recording, finishing, message(String) }
 struct Line: Identifiable { let id = UUID(); let t: String; let text: String; var speaker: String = "other" }  // speaker: "me" (אתה) / "other"
 
 let home = FileManager.default.homeDirectoryForCurrentUser
+
+// כיוון ימין-לשמאל קבוע לטקסט בעברית: סימן RLM בתחילת כל שורה.
+// בלעדיו שורה שמתחילה באנגלית או במספר ("Claude Code זה…") מוצגת משמאל לימין והסדר מתבלגן.
+func he(_ s: String) -> String { "\u{200F}" + s.replacingOccurrences(of: "\n", with: "\n\u{200F}") }
 // הכל מותקן ב-~/Library/Application Support/Timmy (ע"י install.sh)
 let appDir = home.appendingPathComponent("Library/Application Support/Timmy")
 let configURL = appDir.appendingPathComponent("config.json")
@@ -533,7 +537,7 @@ struct BubbleView: View {
             .frame(width: w)
             Color.clear.frame(width: notch.width)
             // כנף ימין: טקסט
-            Text(msg.map { $0.replacingOccurrences(of: " ✓", with: "") } ?? "הקלטה")
+            Text(he(msg.map { $0.replacingOccurrences(of: " ✓", with: "") } ?? "הקלטה"))
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.9))
                 .lineLimit(1).minimumScaleFactor(0.8)
@@ -639,7 +643,7 @@ struct BubbleView: View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Circle().fill(dot ? amber.opacity(0.85) : .clear).frame(width: 4, height: 4)
                 .alignmentGuide(.firstTextBaseline) { d in d[.bottom] + 3.5 }
-            Text(s).font(.system(size: 12.5))
+            Text(he(s)).font(.system(size: 12.5))
                 .foregroundStyle(.white.opacity(dot ? 0.8 : 0.3))
                 .lineSpacing(1.5)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -679,13 +683,13 @@ struct BubbleView: View {
                     Color.clear.frame(height: 6)
                     ForEach(Array(r.lines.enumerated()), id: \.element.id) { i, l in
                         (speakerTag(l.speaker, show: i == 0 || r.lines[i - 1].speaker != l.speaker)
-                         + Text(l.text).font(.system(size: 16)).foregroundColor(.white.opacity(l.speaker == "me" ? 0.78 : 0.95)))
+                         + Text(he(l.text)).font(.system(size: 16)).foregroundColor(.white.opacity(l.speaker == "me" ? 0.78 : 0.95)))
                             .lineSpacing(3)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if !r.partial.isEmpty {
                         (speakerTag(r.partialSpeaker, show: r.lines.last?.speaker != r.partialSpeaker)
-                         + Text(r.partial).font(.system(size: 16)).foregroundColor(.white.opacity(0.45)))
+                         + Text(he(r.partial)).font(.system(size: 16)).foregroundColor(.white.opacity(0.45)))
                             .lineSpacing(3)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -990,7 +994,7 @@ struct ImproveView: View {
                     ForEach(Array(m.items.enumerated()), id: \.offset) { i, t in
                         HStack(spacing: 8) {
                             Circle().fill(amber).frame(width: 5, height: 5)
-                            Text(t).font(.system(size: 13)).foregroundColor(.white.opacity(0.9))
+                            Text(he(t)).font(.system(size: 13)).foregroundColor(.white.opacity(0.9))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             Button(action: { m.remove(i) }) {
                                 Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.5))
@@ -1017,7 +1021,7 @@ struct ImproveView: View {
                 .buttonStyle(.plain).disabled(m.status == .working)
                 switch m.status {
                 case .done(let name): Text("✓ שופר: \(name)").font(.system(size: 12)).foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35)).lineLimit(1)
-                case .failed(let why): Text(why).font(.system(size: 12)).foregroundColor(Color(red: 1, green: 0.4, blue: 0.4))
+                case .failed(let why): Text(he(why)).font(.system(size: 12)).foregroundColor(Color(red: 1, green: 0.4, blue: 0.4))
                 default: Text("הנקודות החיות והסיכומים של השיחות הבאות כבר ייכתבו לפי ההוראות.").font(.system(size: 11)).foregroundColor(.white.opacity(0.4))
                 }
             }
@@ -1234,15 +1238,15 @@ struct OnboardingView: View {
 
     func header(_ title: String, _ sub: String) -> some View {
         VStack(spacing: 10) {
-            Text(title).font(.system(size: 24, weight: .bold)).foregroundColor(.white)
-            Text(sub).font(.system(size: 14)).foregroundColor(.white.opacity(0.65))
+            Text(he(title)).font(.system(size: 24, weight: .bold)).foregroundColor(.white)
+            Text(he(sub)).font(.system(size: 14)).foregroundColor(.white.opacity(0.65))
                 .multilineTextAlignment(.center).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
         }
     }
 
     func primary(_ title: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(.system(size: 15, weight: .semibold)).foregroundColor(.black)
+            Text(he(title)).font(.system(size: 15, weight: .semibold)).foregroundColor(.black)
                 .frame(maxWidth: 260).padding(.vertical, 11)
                 .background(Capsule().fill(amber))
         }.buttonStyle(.plain)
@@ -1250,7 +1254,7 @@ struct OnboardingView: View {
 
     func secondary(_ title: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.7))
+            Text(he(title)).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.7))
                 .padding(.vertical, 8).padding(.horizontal, 16)
                 .background(Capsule().fill(Color.white.opacity(0.08)))
         }.buttonStyle(.plain)
@@ -1260,7 +1264,7 @@ struct OnboardingView: View {
         HStack(spacing: 8) {
             Image(systemName: ok ? "checkmark.circle.fill" : (critical ? "exclamationmark.triangle.fill" : "circle.dashed"))
                 .foregroundColor(ok ? Color(red: 0.19, green: 0.82, blue: 0.35) : (critical ? Color(red: 1, green: 0.27, blue: 0.27) : .white.opacity(0.4)))
-            Text(ok ? okText : waitText).font(.system(size: 13, weight: .medium))
+            Text(he(ok ? okText : waitText)).font(.system(size: 13, weight: .medium))
                 .foregroundColor(ok ? .white : .white.opacity(0.55))
         }
         .padding(.vertical, 9).padding(.horizontal, 14)
@@ -1278,7 +1282,7 @@ struct OnboardingView: View {
                 } else {
                     Image(systemName: "camera.circle.fill").font(.system(size: 14))
                 }
-                Text(label).font(.system(size: 12, weight: .medium))
+                Text(he(label)).font(.system(size: 12, weight: .medium))
                 Text("@yaniv_shef").font(.system(size: 12, weight: .semibold)).environment(\.layoutDirection, .leftToRight)
             }
             .foregroundColor(amber.opacity(0.9))
@@ -1304,9 +1308,9 @@ struct OnboardingView: View {
             Image(systemName: "rectangle.dashed.badge.record").font(.system(size: 40)).foregroundColor(amber)
             header("הרשאה 1: הקול של כרום", "כדי לשמוע את הצד השני בשיחה, מק דורש הרשאת\n\"הקלטת מסך ושמע מערכת\". אני לא מצלם את המסך, רק מקשיב לכרום.")
             VStack(alignment: .leading, spacing: 6) {
-                Text("1.  לחץ \"פתח הגדרות\"").foregroundColor(.white.opacity(0.75))
-                Text("2.  הדלק את המתג ליד \"טימי\" (אם מבקשים, הכנס סיסמה)").foregroundColor(.white.opacity(0.75))
-                Text("3.  חזור לכאן ולחץ \"הפעל את טימי מחדש\"").foregroundColor(.white.opacity(0.75))
+                Text(he("1.  לחץ \"פתח הגדרות\"")).foregroundColor(.white.opacity(0.75))
+                Text(he("2.  הדלק את המתג ליד \"טימי\" (אם מבקשים, הכנס סיסמה)")).foregroundColor(.white.opacity(0.75))
+                Text(he("3.  חזור לכאן ולחץ \"הפעל את טימי מחדש\"")).foregroundColor(.white.opacity(0.75))
                 Text("טימי לא ברשימה? לחץ על + מתחת לרשימה ובחר את טימי מתיקיית היישומים.")
                     .font(.system(size: 12)).foregroundColor(amber.opacity(0.85))
             }.font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
@@ -1364,7 +1368,7 @@ struct OnboardingView: View {
             case .unknown, .checking:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("בודק את החיבור ל-Claude…").font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.7))
+                    Text(he("בודק את החיבור ל-Claude…")).font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.7))
                 }
                 .padding(.vertical, 9).padding(.horizontal, 14)
                 .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
@@ -1372,15 +1376,15 @@ struct OnboardingView: View {
                 status(true, "מחובר ל-Claude", "")
                 primary("המשך") { o.go(5) }
             case .notInstalled:
-                status(false, "", "Claude Code לא נמצא במחשב", critical: true)
-                Text("בלי Claude אקליט ואתמלל, אבל בלי נקודות וסיכום.").font(.system(size: 12)).foregroundColor(.white.opacity(0.5))
+                status(false, "", "לא מצאתי את Claude Code במחשב", critical: true)
+                Text(he("בלי Claude אקליט ואתמלל, אבל בלי נקודות וסיכום.")).font(.system(size: 12)).foregroundColor(.white.opacity(0.5))
                 // כפתור הורדה עם הלוגו של Claude
                 Button(action: { NSWorkspace.shared.open(URL(string: "https://claude.com/claude-code")!) }) {
                     HStack(spacing: 10) {
                         if let logo = resImage("claude") {
                             Image(nsImage: logo).resizable().interpolation(.high).frame(width: 22, height: 22)
                         }
-                        Text("הורד את Claude Code").font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
+                        Text(he("הורד את Claude Code")).font(.system(size: 15, weight: .semibold)).foregroundColor(.white)
                     }
                     .frame(maxWidth: 280).padding(.vertical, 11)
                     .background(Capsule().fill(Color(red: 0.85, green: 0.47, blue: 0.34).opacity(0.22)))
@@ -1391,8 +1395,8 @@ struct OnboardingView: View {
                 secondary("התקנתי, בדוק שוב") { o.checkClaude() }
                 secondary("המשך בלי סיכומים") { o.go(5) }
             case .notLoggedIn:
-                status(false, "", "Claude Code מותקן, אבל לא מחובר לחשבון", critical: true)
-                Text("לחץ \"התחבר\", ייפתח טרמינל עם Claude. התחבר לחשבון שלך, ואז חזור לכאן ולחץ \"בדוק שוב\".")
+                status(false, "", "יש Claude Code, אבל הוא לא מחובר לחשבון", critical: true)
+                Text(he("לחץ \"התחבר\", ייפתח טרמינל עם Claude. התחבר לחשבון שלך, ואז חזור לכאן ולחץ \"בדוק שוב\"."))
                     .font(.system(size: 12)).foregroundColor(.white.opacity(0.6)).multilineTextAlignment(.center)
                 HStack(spacing: 10) {
                     primary("התחבר") { o.openClaudeLogin() }
@@ -1416,20 +1420,20 @@ struct OnboardingView: View {
     var folderStep: some View {
         VStack(spacing: 18) {
             Image(systemName: "folder.fill").font(.system(size: 40)).foregroundColor(amber)
-            header("איפה לשמור את השיחות?", "לכל שיחה נשמרים סיכום, תמלול מלא והקלטה.\nשעה של שיחה תופסת בערך 30MB אחרי השמירה.")
+            header("איפה לשמור את השיחות?", "לכל שיחה נשמרים סיכום, תמלול מלא והקלטה.\nשעה של שיחה תופסת בערך 30 מגה אחרי השמירה.")
             HStack(spacing: 10) {
                 Image(systemName: "folder").foregroundColor(.white.opacity(0.6))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(shortFolder).font(.system(size: 14, weight: .semibold)).foregroundColor(.white).lineLimit(1)
+                    Text(he(shortFolder)).font(.system(size: 14, weight: .semibold)).foregroundColor(.white).lineLimit(1)
                     Text("בתוך \(parentFolder)").font(.system(size: 11)).foregroundColor(.white.opacity(0.5)).lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 10).padding(.horizontal, 14)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
-            status(spaceOK, String(format: "יש %.1f GB פנויים, מספיק להרבה שיחות", o.freeGB),
-                   o.freeGB < 0.5 ? String(format: "רק %.1f GB פנויים: אין מספיק מקום להקלטה. פנה מקום או בחר דיסק אחר", o.freeGB)
-                                  : String(format: "רק %.1f GB פנויים: מספיק לכמה שיחות, כדאי לפנות מקום", o.freeGB),
+            status(spaceOK, String(format: "יש %.1f ג׳יגה פנויים, מספיק להרבה שיחות", o.freeGB),
+                   o.freeGB < 0.5 ? String(format: "רק %.1f ג׳יגה פנויים: אין מספיק מקום להקלטה. פנה מקום או בחר דיסק אחר", o.freeGB)
+                                  : String(format: "רק %.1f ג׳יגה פנויים: מספיק לכמה שיחות, כדאי לפנות מקום", o.freeGB),
                    critical: o.freeGB < 0.5)
             HStack(spacing: 10) {
                 primary("המשך") { o.go(6) }
@@ -1445,7 +1449,7 @@ struct OnboardingView: View {
             VStack(spacing: 8) {
                 status(o.screenOK, "קול של כרום: פעיל", "קול של כרום: לא פעיל")
                 status(o.micOK, "מיקרופון: פעיל", "מיקרופון: כבוי (רק הצד השני יוקלט)")
-                Button(action: { o.go(4) }) { status(o.claude == .ok, "Claude: מחובר (נקודות וסיכומים)", "Claude: לא מחובר (רק תמלול)") }
+                Button(action: { o.go(4) }) { status(o.claude == .ok, "חיבור ל-Claude: פעיל (נקודות וסיכומים)", "חיבור ל-Claude: כבוי (רק תמלול)") }
                     .buttonStyle(.plain)
                 Button(action: { o.go(5) }) { status(spaceOK, "שמירה ב: " + shortFolder, "שמירה ב: " + shortFolder + " (מעט מקום)") }
                     .buttonStyle(.plain)
