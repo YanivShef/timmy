@@ -12,7 +12,8 @@ APP_DIR="$HOME/Library/Application Support/Timmy"
 MODEL="mlx-community/ivrit-ai-whisper-large-v3-turbo-mlx"
 PY_VERSION="3.12"
 
-NAME=""; ABOUT=""; PEOPLE=""; OUTDIR="$HOME/Documents/טימי - הקלטות"; VENV=""; SHORTCUTS=1
+# OUTDIR ריק = לא נבחרה תיקייה: בהתקנה ראשונה ברירת המחדל, בעדכון נשארת התיקייה שכבר מוגדרת ב-config.json
+NAME=""; ABOUT=""; PEOPLE=""; OUTDIR=""; DEFAULT_OUTDIR="$HOME/Documents/טימי - הקלטות"; VENV=""; SHORTCUTS=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --name) NAME="$2"; shift 2;;
@@ -130,8 +131,7 @@ cp "$HERE/live.py" "$APP_DIR/live.py"
 cp "$HERE/pdf.py" "$APP_DIR/pdf.py"
 cp "$HERE/pdf_template.html" "$APP_DIR/pdf_template.html"
 cp "$HERE/pdf_sample.md" "$APP_DIR/pdf_sample.md"
-mkdir -p "${OUTDIR/#\~/$HOME}"
-NAME="$NAME" ABOUT="$ABOUT" PEOPLE="$PEOPLE" OUTDIR="$OUTDIR" CLAUDE_PATH="$CLAUDE_PATH" FFMPEG="$FFMPEG" \
+NAME="$NAME" ABOUT="$ABOUT" PEOPLE="$PEOPLE" OUTDIR="$OUTDIR" DEFAULT_OUTDIR="$DEFAULT_OUTDIR" CLAUDE_PATH="$CLAUDE_PATH" FFMPEG="$FFMPEG" \
 CFG="$APP_DIR/config.json" "$APP_DIR/venv/bin/python" - <<'PY'
 import json, os
 p = os.environ["CFG"]
@@ -144,6 +144,9 @@ def setv(k, v):
 setv("owner_name", os.environ["NAME"].strip())
 setv("owner_description", os.environ["ABOUT"].strip())
 setv("output_dir", os.environ["OUTDIR"].strip())
+# עדכון בלי --output-dir: לא דורסים את התיקייה שהמשתמש כבר בחר (גם באונבורדינג)
+if not str(cfg.get("output_dir") or "").strip(): cfg["output_dir"] = os.environ["DEFAULT_OUTDIR"]
+os.makedirs(os.path.expanduser(cfg["output_dir"]), exist_ok=True)
 setv("claude_path", os.environ["CLAUDE_PATH"].strip())
 setv("ffmpeg_path", os.environ["FFMPEG"].strip())
 if os.environ["PEOPLE"].strip():
