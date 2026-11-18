@@ -819,11 +819,15 @@ func parseAppearance(_ t: String) -> [String: Any]? {
         if has(["תוריד", "בלי", "תכבה", "תבטל", "תעצור", "off"]) { out["animations"] = false }
         else if has(["תחזיר", "תדליק", "תפעיל", "on"]) { out["animations"] = true }
     }
-    // בלי יעד מפורש = צבע ההדגשה. isSimpleLooks מחליט אם מותר לנחש את זה בלי Claude
-    let target: String = looksTargets(l).first ?? "accent_color"
+    // יעד הצבע: רקע / עיניים / הדגשה (אנימציות הן לא יעד של צבע). בלי יעד מפורש = צבע ההדגשה; isSimpleLooks מחליט אם מותר לנחש את זה בלי Claude
+    let colorTargets = looksTargets(l).filter { $0 != "animations" }
+    let target: String = colorTargets.first ?? "accent_color"
+    let mentionsAnim = looksTargets(l).contains("animations")
     if has(["מקורי", "מקוריים", "מקוריות"]) {
-        out[target] = target == "background_color" ? "#000000" : (target == "eye_color" ? "" : defaultAccent)
-    } else if let hex = colorIn(l) {
+        // "תחזיר את האנימציות המקוריות" = להדליק אנימציות, לא לאפס את צבע ההדגשה
+        if mentionsAnim && colorTargets.isEmpty { if out["animations"] == nil { out["animations"] = true } }
+        else { out[target] = target == "background_color" ? "#000000" : (target == "eye_color" ? "" : defaultAccent) }
+    } else if let hex = colorIn(l), !(mentionsAnim && colorTargets.isEmpty) {
         out[target] = shade(hex, l)
     }
     return out.isEmpty ? nil : out
@@ -1843,6 +1847,13 @@ func isSimpleLooks(_ t: String, recent: [String] = []) -> Bool {
         + (hasWord(l, "כתום") ? 1 : 0) + (hasWord(l, "שחור") ? 1 : 0) + (l.range(of: "#[0-9a-f]{6}", options: .regularExpression) != nil ? 1 : 0)
     let other = ["נקודות", "סיכום", "סעיף", "משימות", "pdf", "לוגו", "הוראה", "שיחה"].contains { l.contains($0) }
     guard targets.count <= 1, colors <= 1, !other, !l.contains(" וגם ") else { return false }
+    // שלילה ליד צבע או יעד ("אל תיגע ברקע", "רקע לא לבן", "בלי רקע לבן", "כחול אבל לא כהה", "ירוקות מדי"): המסלול המהיר היה עושה את ההפך. Claude מבין
+    // ("בלי אנימציות" / "תוריד אנימציות" נשארים מהירים: שם השלילה היא הפקודה עצמה)
+    let negated = ["לא", "אל", "בלי", "מדי", "ללא", "not", "don't", "without", "too"].contains { hasWord(l, $0) }   // גם "ולא", "שלא"
+    if negated && (colors > 0 || targets.contains { $0 != "animations" }) { return false }
+    // אנימציות עם צבע ("תפעיל אנימציות בכחול"): לא ברור לאן הצבע שייך, אז Claude
+    // וגם "תוריד אנימציות ותחזיר לצבע המקורי": שתי בקשות, אחת מהן על צבע
+    if targets == ["animations"] && (colors > 0 || l.contains("צבע") || hasWord(l, "color", prefixes: false)) { return false }
     if targets.count == 1 { return true }
     // בלי יעד מפורש: רק "הצבע" / "צבע" כקיצור להדגשה, ורק כשההקשר האחרון לא על יעד אחר
     guard colors == 1, hasWord(l, "צבע") || hasWord(l, "color", prefixes: false) else { return false }
@@ -2798,6 +2809,7 @@ struct OnboardingView: View {
         .background(bgColor)
         .environment(\.layoutDirection, .rightToLeft)
         .animation(.easeInOut(duration: 0.2), value: o.step)
+        .id(Theme.version)   // שינוי מראה כשהחלון פתוח
     }
 
     var avatar: some View {
@@ -4872,6 +4884,8 @@ struct CallsView: View {
         .background(bgColor)
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.colorScheme, themeScheme)
+        // שינוי מראה כשהחלון פתוח: בונים את כל התוכן מחדש. בלי זה שורות, הסיכום והשדות נשארים בצבעי הטקסט הישנים (לבן על לבן)
+        .id(Theme.version)
     }
 }
 
@@ -5870,6 +5884,7 @@ struct PDFDesignView: View {
         .background(bgColor)
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.colorScheme, themeScheme)
+        .id(Theme.version)   // שינוי מראה כשהחלון פתוח: הבועות, השדה והכפתורים נבנים מחדש בצבעים החדשים
         .onAppear { m.load() }
     }
 }
