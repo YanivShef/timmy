@@ -60,12 +60,24 @@ configure({{}})
 '''
 
 # ---- verbatim copies with Windows patches ----------------------------------------------------------------------------
-# (old, new, expected count). Build step 3 extends the pdf.py list (fcntl lock, process-tree kill via Job Objects,
-# the interpreter list and PATH of linked skills).
+# (old, new, expected count). pdf.py's macOS-only parts call timmy/engine/pdf_win.py instead (build step 3): the app
+# folder, Claude Code finder, run() in a Job Object (no console, tree kill on timeout), the flock shim, and the
+# interpreters / PATH for scripts of linked PDF skills.
 PATCHES = {
     "pdf.py": [
-        ('os.path.expanduser("~/Library/Application Support/Timmy")',
-         'os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "Timmy")', 1),
+        ('from html.parser import HTMLParser\n',
+         'from html.parser import HTMLParser\nfrom timmy.engine import pdf_win as _win  # Windows (windows/tools/sync_mac.py)\n', 1),
+        ('os.path.expanduser("~/Library/Application Support/Timmy")', '_win.app_dir()', 1),
+        ('def claude_path():\n', 'def claude_path():\n    return _win.find_claude(CFG)\n\n\ndef _mac_claude_path():\n', 1),
+        ('def run(argv, input=None, timeout=60, cwd=None, env=None):\n',
+         'def run(argv, input=None, timeout=60, cwd=None, env=None):\n'
+         '    return _win.run(argv, input=input, timeout=timeout, cwd=cwd, env=env, children=_CHILDREN)\n\n\n'
+         'def _mac_run(argv, input=None, timeout=60, cwd=None, env=None):\n', 1),
+        ('os.killpg(p.pid, signal.SIGKILL)', '_win.kill(p)', 2),
+        ('    import fcntl\n', '    fcntl = _win.fcntl\n', 1),
+        ('def interpreters(kind):\n', 'def interpreters(kind):\n    return _win.interpreters(kind)\n\n\ndef _mac_interpreters(kind):\n', 1),
+        ('env["PATH"] = os.path.dirname(interp) + ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"',
+         'env["PATH"] = _win.skill_path(interp)', 1),
         ('cwd="/tmp"', 'cwd=tempfile.gettempdir()', 4),
         ('os.environ.get("PATH", "").split(":")', 'os.environ.get("PATH", "").split(os.pathsep)', 1),
         ('os.path.dirname(os.path.realpath(_cp)) + ":" + os.path.dirname(_cp) + ":" + os.environ.get("PATH", "")',

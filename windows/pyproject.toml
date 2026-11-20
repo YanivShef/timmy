@@ -46,6 +46,7 @@ include = ["timmy*"]
 
 [tool.setuptools.package-data]
 "timmy.engine._mac" = ["*.html", "*.md"]
+"timmy.ui" = ["assets/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

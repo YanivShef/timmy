@@ -20,8 +20,9 @@
 # אם Claude לא זמין / נכשל / חרג מ-120 שניות: המרה מקומית של ה-Markdown, כך שתמיד יוצא PDF.
 import sys, os, re, json, html, base64, subprocess, shutil, glob, time, hashlib, tempfile, signal, atexit, urllib.parse
 from html.parser import HTMLParser
+from timmy.engine import pdf_win as _win  # Windows (windows/tools/sync_mac.py)
 
-APP_DIR = os.environ.get("TIMMY_APP_DIR") or os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "Timmy")
+APP_DIR = os.environ.get("TIMMY_APP_DIR") or _win.app_dir()
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TEMPLATE = os.path.join(HERE, "pdf_template.html")
 PDF_DIR = os.path.join(APP_DIR, "pdf")
@@ -52,6 +53,10 @@ def pick_model(key, default):
 
 
 def claude_path():
+    return _win.find_claude(CFG)
+
+
+def _mac_claude_path():
     cands = [CFG.get("claude_path") or "", shutil.which("claude") or "",
              os.path.expanduser("~/.claude/local/claude"), os.path.expanduser("~/.local/bin/claude"),
              "/opt/homebrew/bin/claude", "/usr/local/bin/claude"] + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/claude")), reverse=True)
@@ -72,7 +77,7 @@ DEADLINE = None   # זמן (time.time()) שעד אליו pdf.py חייב לסי�
 
 def _kill_children():
     for p in list(_CHILDREN):
-        try: os.killpg(p.pid, signal.SIGKILL)
+        try: _win.kill(p)
         except Exception: pass
 
 
@@ -91,6 +96,10 @@ def left(cap, reserve=8):
 
 
 def run(argv, input=None, timeout=60, cwd=None, env=None):
+    return _win.run(argv, input=input, timeout=timeout, cwd=cwd, env=env, children=_CHILDREN)
+
+
+def _mac_run(argv, input=None, timeout=60, cwd=None, env=None):
     """כמו subprocess.run(capture_output=True, text=True), אבל בחריגה מהזמן נהרגת כל הקבוצה (גם תהליכי-נכד)."""
     p = subprocess.Popen(argv, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, text=True, cwd=cwd, env=env, start_new_session=True)
@@ -98,7 +107,7 @@ def run(argv, input=None, timeout=60, cwd=None, env=None):
     try:
         out, err = p.communicate(input, timeout=timeout)
     except subprocess.TimeoutExpired:
-        try: os.killpg(p.pid, signal.SIGKILL)
+        try: _win.kill(p)
         except Exception: pass
         try: p.communicate(timeout=5)
         except Exception: pass
@@ -971,7 +980,7 @@ def runtime_copy(d, sig):
         except Exception: pass
         if total > 150_000_000: return d
     os.makedirs(RUNTIME_DIR, exist_ok=True)
-    import fcntl
+    fcntl = _win.fcntl
     with open(os.path.join(RUNTIME_DIR, ".lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         try:
@@ -998,6 +1007,10 @@ def runtime_copy(d, sig):
 
 
 def interpreters(kind):
+    return _win.interpreters(kind)
+
+
+def _mac_interpreters(kind):
     if kind == "python":
         c = [sys.executable, "/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"]
     elif kind == "node":
@@ -1076,7 +1089,7 @@ def run_recipe(recipe, rt_dir, interp, md_text, vals, style_args=None, timeout=R
             filled.append(x)
         if not empty: argv += filled   # ארגומנט שהערך שלו ריק (למשל אין פרטי קשר) לא נשלח
     env = dict(os.environ)
-    env["PATH"] = os.path.dirname(interp) + ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+    env["PATH"] = _win.skill_path(interp)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.pop("PYTHONPATH", None); env.pop("VIRTUAL_ENV", None); env.pop("PYTHONHOME", None)
     try:

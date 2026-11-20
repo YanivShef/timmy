@@ -104,7 +104,8 @@ def command(claude: str, args: list[str]):
             if any(ch in a for ch in '"&|<>^%!\r\n'):
                 raise ValueError(f"unsafe argument for a .cmd shim: {a!r}")
         comspec = os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe"
-        inner = " ".join([f'"{claude}"'] + [f'"{a}"' if " " in a else a for a in args])
+        # an empty argument (pdf.py passes --tools "") must survive as "" or the next flag becomes its value
+        inner = " ".join([f'"{claude}"'] + [f'"{a}"' if (" " in a or not a) else a for a in args])
         return f'"{comspec}" /d /s /c "{inner}"'
     return [claude] + list(args)
 

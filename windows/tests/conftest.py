@@ -71,3 +71,51 @@ def claude_calls(logf: Path) -> list:
     if not logf.exists():
         return []
     return [json.loads(x) for x in logf.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+
+# ---- Qt (build step 3) ---------------------------------------------------------------------------------------------
+SCREENS = OUT / "screens"          # PNG screenshots of every UI state, uploaded by CI
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """One QApplication for the session, offscreen unless QT_QPA_PLATFORM says otherwise (CI sets offscreen)."""
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("TIMMY_INSTANCE_NAME", f"timmy-test-{os.getpid()}")
+    from timmy.ui.app import make_app
+    app = make_app(["pytest"])
+    yield app
+
+
+@pytest.fixture
+def screens(qapp):
+    SCREENS.mkdir(parents=True, exist_ok=True)
+    return SCREENS
+
+
+def wait_until(qapp, cond, timeout=20.0, step=0.02):
+    """Run the Qt event loop until cond() is true (or the timeout). Returns cond()."""
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        qapp.processEvents()
+        if cond():
+            return True
+        time.sleep(step)
+    qapp.processEvents()
+    return bool(cond())
+
+
+def save_shot(widget, path, backdrop="#3a4a5c"):
+    """widget.grab() over an opaque backdrop (the island is translucent), saved as PNG. Returns the QImage."""
+    from PySide6.QtGui import QColor, QPainter, QPixmap
+    pm = widget.grab()
+    canvas = QPixmap(pm.size())
+    canvas.setDevicePixelRatio(pm.devicePixelRatio())
+    canvas.fill(QColor(backdrop))
+    p = QPainter(canvas)
+    p.drawPixmap(0, 0, pm)
+    p.end()
+    canvas.save(str(path))
+    return canvas.toImage()

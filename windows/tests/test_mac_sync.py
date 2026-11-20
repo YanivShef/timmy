@@ -51,7 +51,13 @@ def test_live_shared_behaves_like_mac():
 
 def test_vendored_pdf_and_skill_render_patched():
     src = (WIN / "timmy" / "engine" / "_mac" / "pdf.py").read_text(encoding="utf-8")
-    assert 'cwd="/tmp"' not in src and "LOCALAPPDATA" in src
+    assert 'cwd="/tmp"' not in src and "_win.app_dir()" in src
+    # build step 3: every macOS-only call of pdf.py goes through timmy/engine/pdf_win.py
+    for gone in ("import fcntl", "os.killpg(", ':/usr/bin:/bin', '.split(":")'):
+        assert gone not in src, gone
+    for there in ("return _win.find_claude(CFG)", "return _win.run(argv", "fcntl = _win.fcntl", "return _win.interpreters(kind)",
+                  'env["PATH"] = _win.skill_path(interp)'):
+        assert there in src, there
     sr = (WIN / "timmy" / "engine" / "_mac" / "skill_render.py").read_text(encoding="utf-8")
     assert "chrome.exe" in sr and "msedge.exe" in sr
     for name in ("pdf_template.html", "pdf_sample.md"):
