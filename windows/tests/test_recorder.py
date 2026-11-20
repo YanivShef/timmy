@@ -46,9 +46,17 @@ def call_env(tmp_path, app_dir, fake_claude, monkeypatch):
     return rec
 
 
+_ALIVE = []
+
+
 def new_recorder():
+    """In the app the one Recorder lives as long as the process. Here each test makes its own, and tests connect lambdas
+    that reference it (a reference cycle), so the cyclic GC used to free an old Recorder from inside one of its own
+    QTimer slots during a later test's event loop: an access violation on windows-latest. Keep every one alive."""
     from timmy.ui.recorder import Recorder
-    return Recorder()
+    r = Recorder()
+    _ALIVE.append(r)
+    return r
 
 
 def test_full_call_saved(qapp, call_env, app_dir):
@@ -91,9 +99,6 @@ def test_model_failure_is_shown_and_files_deleted(qapp, call_env, tmp_path, monk
     assert r.message == MODEL_MESSAGES["model_missing"] and failed == ["model_missing"]
     assert wait_until(qapp, lambda: not os.path.exists(call_env) or os.listdir(call_env) == [], 10), os.listdir(call_env)
     assert r.worker_error is None
-    # the 6 s message timer must not outlive this test's recorder (a cyclic-GC delete inside a later event loop crashes)
-    r._flash_timer.stop()
-    r._end_flash()
     r.model_failed.disconnect()
 
 

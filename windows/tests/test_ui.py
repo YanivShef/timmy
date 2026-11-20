@@ -31,10 +31,14 @@ def bright_pixels(img, color=None):
     return n
 
 
+_ALIVE = []
+
+
 def make_island(qapp, look=None):
     from timmy.ui.island import Island
     from timmy.ui.recorder import Recorder
     r = Recorder()
+    _ALIVE.append(r)                 # see tests/test_recorder.py new_recorder: never freed by the GC mid event loop
     isl = Island(r, look)
     isl.show()
     qapp.processEvents()

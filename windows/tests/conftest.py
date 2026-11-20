@@ -10,6 +10,14 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 OUT = WIN / "out"                               # CI uploads this folder (logs, screenshots, junit)
 
 
+def pytest_runtest_logreport(report):
+    """CI: print a failure's traceback the moment it happens. A crash of the whole process (Qt, ctypes) later in the run
+    would otherwise lose the summary, and with it every earlier failure's reason."""
+    if report.failed and os.environ.get("CI"):
+        sys.stderr.write(f"\n----- FAILED {report.nodeid} ({report.when}) -----\n{report.longreprtext}\n-----\n")
+        sys.stderr.flush()
+
+
 def pytest_collection_modifyitems(config, items):
     skip_win = pytest.mark.skip(reason="needs a Windows host")
     for item in items:
