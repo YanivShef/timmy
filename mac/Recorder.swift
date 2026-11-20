@@ -1432,6 +1432,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         // בדיקות: יצירת PDF משורת הפקודה, בלי בועה ובלי חלונות
         if args.contains("--make-pdf") { _ = onboarding; runPDFCLI(); return }
+        // בדיקות: תמונות ב-PDF בלי חלונות (מדפיס JSON ויוצא):
+        //   --demo-add-images <סיכום.md> <תמונה>... [--demo-where "סעיף"/start/end] [--demo-caption "..."]
+        //   --demo-video-frames <סיכום.md> <סרטון> [--demo-at "3:20, 12:05"] [--demo-count N]
+        //   --demo-image-edit <סיכום.md> <מספר> remove|up|down|move|caption [ערך]
+        //   --demo-find-video "<מילים>"   [--demo-cancel-after N] [--demo-no-pdf]
+        if ["--demo-add-images", "--demo-video-frames", "--demo-image-edit", "--demo-find-video"].contains(where: args.contains) { _ = onboarding; runImagesCLI(); return }
         // בדיקות: איזה Claude Code נבחר ומה המצב שלו (JSON), ויוצא
         if args.contains("--claude-check") {
             let cands = claudeCandidatePaths()
@@ -1491,6 +1497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // רקע ומראה המערכת (בהיר/כהה) של החלונות הפתוחים
             for w in [self.onboardingWindow, self.improveWindow, self.designWindow, self.callsWindow, self.pdfDesignWindow] { styleWindow(w) }
         }
+        NotificationCenter.default.addObserver(forName: Notification.Name("timmy.callsChanged"), object: nil, queue: .main) { [weak self] _ in self?.calls.reloadIfChanged() }
         NotificationCenter.default.addObserver(forName: Notification.Name("timmy.diskFull"), object: nil, queue: .main) { [weak self] _ in
             self?.showOnboarding(step: 5)
         }
@@ -1522,7 +1529,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if design { self.openDesign() } else { self.openImprove() }
                 let m = design ? self.designChat : self.improve
                 if args.contains("--demo-memory") { m.showMemory = true }   // פאנל "מה אני זוכר" פתוח
-                for (i, a) in args.enumerated() where a == "--demo-chat-send" && i + 1 < args.count { m.send(args[i + 1]) }
+                // --demo-chat-attach <קובץ>...: הקבצים מצורפים להודעה הראשונה (כמו 📎)
+                var sends = args.indices.filter { args[$0] == "--demo-chat-send" && $0 + 1 < args.count }.map { args[$0 + 1] }
+                let att = argList("--demo-chat-attach").map { URL(fileURLWithPath: $0) }
+                if !att.isEmpty { m.addAttachments(att); m.input = sends.isEmpty ? "" : sends.removeFirst(); m.send() }
+                for t in sends { m.send(t) }
             }
         }
         // יצירת סקילים / שימוש בסקיל קיים (בדיקות, עם --demo-exit: מדפיס JSON ויוצא בסוף):
@@ -1738,7 +1749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openCalls() {
         calls.start()
         if callsWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1140, height: 800),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1140, height: argString("--demo-calls-height").flatMap { Double($0) } ?? 800),
                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             w.titlebarAppearsTransparent = true; w.titleVisibility = .hidden
             w.isMovableByWindowBackground = true; w.isReleasedWhenClosed = false
@@ -1756,7 +1767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // "עיצוב ה-PDF" (צ'אט). send: הוראה שהגיעה מ"שפר את טימי"
     var pdfDesignWindow: NSWindow?
     let pdfDesign = PDFDesignModel()
-    func openPDFDesign(send text: String?, adopt: SkillInfo? = nil, then extra: String? = nil, createSkillFrom: URL? = nil, pick: Bool = false) {
+    func openPDFDesign(send text: String?, logo: URL? = nil, adopt: SkillInfo? = nil, then extra: String? = nil, createSkillFrom: URL? = nil, pick: Bool = false) {
         if pdfDesignWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 860),
                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -1771,7 +1782,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         pdfDesignWindow?.makeKeyAndOrderFront(nil)
         pdfDesign.load(quiet: adopt != nil || createSkillFrom != nil || pick)
-        if let text, !text.isEmpty { pdfDesign.send(text) }
+        // לוגו שצורף בצ'אט "שפר את טימי": עובר לכאן כמו 📎 של החלון הזה (עותק בתיקיית טימי)
+        let lg = logo.flatMap { pdfDesign.copyLogo($0) }
+        if let text, !text.isEmpty { pdfDesign.send(text, logo: lg) } else if let lg { pdfDesign.send("הנה הלוגו שלי, תשים אותו בראש המסמך", logo: lg) }
         if let adopt { pdfDesign.adoptSkill(adopt, then: extra) }
         if let f = createSkillFrom { pdfDesign.createSkill(from: f) } else if pick { DispatchQueue.main.async { self.pdfDesign.pickPDFForSkill() } }
     }
@@ -1826,6 +1839,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         if args.contains("--demo-pdf"), let c = calls.selected { calls.makePDF(c) }
+        // תמונות ב-PDF מחלון השיחות: --demo-call-add-images <תמונה>... / --demo-call-video <סרטון> [--demo-at "3:20"] (כמו גרירה / כפתור)
+        if let c = calls.selected, !argList("--demo-call-add-images").isEmpty { calls.handleDrop(c, argList("--demo-call-add-images").map { URL(fileURLWithPath: $0) }) }
+        if let c = calls.selected, let v = argString("--demo-call-video") { calls.videoFrames(c, URL(fileURLWithPath: v), at: parseTimes(argString("--demo-at") ?? "")) }
+        // בדיקה: --demo-cancel-pdf-after N = לוחצים "בטל" N שניות אחרי שה-PDF התחיל להיבנות
+        if let c = calls.selected, let n = argString("--demo-cancel-pdf-after").flatMap({ Double($0) }) {
+            func poll() {
+                if calls.pdf[c.id] == .working { DispatchQueue.main.asyncAfter(deadline: .now() + n) { self.calls.cancelPDF(c) } }
+                else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { poll() } }
+            }
+            poll()
+        }
         // שינוי כותרת: --demo-rename-ui (עורך פתוח) / --demo-rename "כותרת חדשה" (שינוי בפועל)
         if args.contains("--demo-rename-ui"), let c = calls.selected {
             calls.startRename(c)
@@ -2817,23 +2841,34 @@ final class TimmyChatModel: ObservableObject {
         return before == after ? nil : "המראה לפני: " + before + ". אחרי: " + after
     }
 
-    // 📎: דוגמאות כתיבה (PDF, Word, טקסט) או PDF שרוצים ממנו סקיל עיצוב
-    static let attachTypes: [UTType] = [.pdf, .plainText, .rtf, .html] + ["docx", "doc", "md", "markdown", "odt"].compactMap { UTType(filenameExtension: $0) }
+    // 📎: דוגמאות כתיבה (PDF, Word, טקסט), PDF שרוצים ממנו סקיל עיצוב, תמונות / צילומי מסך ל-PDF של שיחה, או סרטון לקחת ממנו תמונות
+    static let attachTypes: [UTType] = [.pdf, .plainText, .rtf, .html, .image, .movie] + ["docx", "doc", "md", "markdown", "odt", "heic", "webp", "mkv", "webm"].compactMap { UTType(filenameExtension: $0) }
     func attach() {
         let p = NSOpenPanel()
         p.allowedContentTypes = Self.attachTypes
         p.allowsMultipleSelection = true; p.canChooseDirectories = false
-        p.message = "צרף קבצים: דוגמאות של איך שאתה כותב (הודעות, מיילים, מסמכים), או PDF שאתה אוהב את העיצוב שלו"
+        p.message = "צרף קבצים: צילומי מסך או תמונות ל-PDF של שיחה, סרטון לקחת ממנו תמונות, דוגמאות של איך שאתה כותב, או PDF שאתה אוהב את העיצוב שלו"
         p.prompt = "צרף"
         NSApp.activate(ignoringOtherApps: true)
         if p.runModal() == .OK { addAttachments(p.urls) }
     }
     func addAttachments(_ urls: [URL]) {
         let ok = ["pdf", "txt", "text", "md", "markdown", "rtf", "docx", "doc", "odt", "html", "htm"]
-        let good = urls.filter { ok.contains($0.pathExtension.lowercased()) }
+        let good = urls.filter { ok.contains($0.pathExtension.lowercased()) || isImageFile($0) || isVideoFile($0) }
         for u in good where !attachments.contains(u) { attachments.append(u) }
-        if good.count < urls.count { say("אפשר לצרף PDF, Word, טקסט או Markdown. את השאר דילגתי.", error: true) }
+        if good.count < urls.count { say("אפשר לצרף תמונות, סרטון, PDF, Word, טקסט או Markdown. את השאר דילגתי.", error: true) }
     }
+    // הקבצים של ההודעה האחרונה של המשתמש שצורפו בה תמונות (רק מההודעות האחרונות): זה מה ש"את זה" / "אותן" מתכוון אליו.
+    // תמונות מהודעות קודמות בשיחה כבר טופלו (אולי לשיחה של לקוח אחר), ולא נכנסות בלי שביקש אותן בשם
+    var latestImageBatch: [URL] {
+        for m in msgs.suffix(8).reversed() where m.fromUser {
+            let imgs = (m.files ?? []).map { URL(fileURLWithPath: $0) }.filter(isImageFile)
+            if !imgs.isEmpty { return imgs }
+        }
+        return []
+    }
+    // הקבצים שצורפו להודעה שטימי עונה עליה עכשיו
+    var currentFiles: [URL] { msgs.last.map { $0.fromUser ? ($0.files ?? []).map { URL(fileURLWithPath: $0) } : [] } ?? [] }
     // כל הקבצים שצורפו בשיחה (מהישן לחדש), לפי השם שלהם
     var attachedFiles: [URL] {
         var out: [URL] = []
@@ -2873,7 +2908,18 @@ final class TimmyChatModel: ObservableObject {
         }
         askClaude(t)
     }
-    private func next() { if busy == nil, !queue.isEmpty { send(queue.removeFirst()) } }
+    private func next() {
+        if busy == nil, !queue.isEmpty { send(queue.removeFirst()); return }
+        // בדיקות: --demo-exit-idle מדפיס את השיחה ויוצא כשטימי סיים את כל ההודעות
+        if busy == nil, queue.isEmpty, args.contains("--demo-exit-idle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                guard self.busy == nil, self.queue.isEmpty else { return }
+                let o = self.msgs.suffix(12).map { ["user": $0.fromUser, "text": $0.text, "ctx": $0.ctx ?? "", "image": $0.image ?? "", "error": $0.isError] as [String: Any] }
+                if let d = try? JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted]), let t = String(data: d, encoding: .utf8) { print(t); fflush(stdout) }
+                exit(0)
+            }
+        }
+    }
 
     func prompt(_ t: String) -> String {
         let owner = ((loadConfig()["owner_name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
@@ -2885,7 +2931,9 @@ final class TimmyChatModel: ObservableObject {
             : """
             - {"type":"add_instruction","text":"..."} הוראה קבועה לנקודות שבזמן השיחה או לסיכום השיחה. ניסוח קצר וברור, כמו הוראה למסכם.
             - {"type":"remove_instruction","text":"<הטקסט המדויק מהרשימה>"}
-            - {"type":"pdf_instruction","text":"..."} כל מה שקשור לקובץ ה-PDF ללקוח (לוגו, עיצוב המסמך, שם העסק, פרטי קשר בתחתית). הטקסט עובר לצ'אט אחר שלא רואה את השיחה הזאת, אז הוא חייב לעמוד בפני עצמו: קודם תפתור את ההקשר ואז תכתוב הוראה מלאה (לא "עוד יותר", אלא "הכותרות בכחול כהה יותר מעכשיו").
+            - {"type":"pdf_instruction","text":"...","logo":"<שם קובץ התמונה שצירף, רק אם זה הלוגו שלו>"} כל מה שקשור לקובץ ה-PDF ללקוח (לוגו, עיצוב המסמך, שם העסק, פרטי קשר בתחתית). הטקסט עובר לצ'אט אחר שלא רואה את השיחה הזאת, אז הוא חייב לעמוד בפני עצמו: קודם תפתור את ההקשר ואז תכתוב הוראה מלאה (לא "עוד יותר", אלא "הכותרות בכחול כהה יותר מעכשיו").
+              לוגו: אם צירף תמונה ואמר שזה הלוגו, תעביר את השם שלה ב-logo, וטימי מעביר את הקובץ עצמו לחלון "עיצוב ה-PDF". \(savedLogoExists() ? "כבר יש לוגו שמור ב-PDF: שינוי בו (גודל, מיקום) = pdf_instruction רגיל." : "עוד אין לוגו שמור ב-PDF: אם ביקש לשים לוגו ולא צירף תמונה, אל תחזיר pdf_instruction, ותבקש ממנו לצרף את הלוגו עם 📎.")
+              ב-reply תגיד שאתה מעביר את זה לחלון "עיצוב ה-PDF" ושם יראה את התוצאה בעוד רגע. אל תגיד שכבר שינית או הוספת: השינוי קורה שם.
             - {"type":"apply_to_last_call"} רק אם המשתמש ביקש להחיל על השיחה האחרונה (גם "כן" לשאלה שלך אם להחיל).
             - {"type":"link_skill","purpose":"pdf" או "writing","skill":"<השם המדויק מרשימת הסקילים, או נתיב>"} לחבר סקיל של Claude שיש במחשב.
               "pdf" = טימי משתמש בסקיל כמו שהוא: אם יש לסקיל סקריפט שמייצר PDF, כל ה-PDF-ים ללקוח ייצאו ממנו, בדיוק כמו בקלוד קוד. אם אין, טימי מעצב את התבנית שלו לפי הסקיל. זה קורה לבד בחלון "עיצוב ה-PDF" מיד אחרי החיבור, אז אל תוסיף על זה pdf_instruction. ב-reply רק תגיד איזה סקיל חיברת. אל תגיד לו לפתוח את חלון עיצוב ה-PDF: הוא נפתח לבד, וטימי מוסיף על זה שורה בעצמו.
@@ -2906,6 +2954,13 @@ final class TimmyChatModel: ObservableObject {
             - {"type":"unlink_skill","purpose":"pdf" או "writing"} לנתק סקיל מחובר. מה קורה אחרי ניתוק של סקיל ה-PDF תלוי במצב (ראה "סקילים מחוברים"):
               אם כתוב שהסקיל מייצר את ה-PDF בעצמו: מעכשיו ה-PDF-ים חוזרים לצאת בעיצוב של טימי (העיצוב שהיה לפני החיבור). תגיד את זה בפשטות.
               אחרת (טימי רק עיצב את התבנית שלו לפי הסקיל): העיצוב שכבר נעשה נשאר, ורק הבקשות הבאות לא ייעשו לפי הסקיל. מי שרוצה לחזור לעיצוב המקורי לוחץ "חזור לעיצוב המקורי" בחלון עיצוב ה-PDF.
+            - תמונות ב-PDF של שיחה (צילומי מסך, תמונות מסרטון). "call" = המספר של השיחה מהרשימה "השיחות השמורות". אם לא ברור לאיזו שיחה (אין שם, אין הקשר בשיחה הזאת, או כמה מתאימות), אל תחזיר פעולה: תשאל ב-reply ותציע 2 עד 3 שיחות בשם. אם דיברנו קודם על שיחה מסוימת, זו השיחה.
+              {"type":"add_images","call":N,"files":[],"section":"<שם סעיף מהסיכום / start / end, ריק = טימי מסתכל על התמונה ובוחר לבד>","caption":"<רק אם הכתיב כיתוב>"} להוסיף ל-PDF תמונות שצירף עם 📎.
+                files ריק = כל התמונות שצורפו בהודעה החדשה (או בהודעה האחרונה שצורפו בה תמונות). זה מה שצריך כמעט תמיד, גם כשצורפו כמה תמונות והוא כותב "את זה". שמות ב-files רק אם ביקש במפורש חלק מהן ("רק את הראשונה") או תמונה מהודעה קודמת בשם שלה. אף פעם לא תמונה מהודעה קודמת במקום התמונות החדשות.
+                תמונות שונות לשיחות שונות ("את הראשונה לירין ואת השנייה ליוסי"): add_images נפרד לכל שיחה, וב-files של כל אחד רק השמות של התמונות שלה. אותן תמונות לכמה שיחות: add_images לכל שיחה עם files ריק.
+              {"type":"image_edit","call":N,"image":<מספר התמונה ב-PDF של השיחה, לפי הרשימה>,"op":"remove"/"move"/"caption","to":"start"/"end"/"up"/"down"/"<שם סעיף מהסיכום>","caption":"<הכיתוב החדש>"} למחוק, להזיז ("תשים אותה בסוף" = move end, "תקדים אותה" = move up) או לשנות כיתוב. "התמונה השנייה" = image 2. "אותה" / "את זה" = התמונה שדיברנו עליה אחרונה (כתוב בהערה הפנימית של ההודעה האחרונה של טימי: "התמונה שדיברנו עליה עכשיו"). המספר תמיד מהרשימה, לא לנחש.
+              {"type":"video_frames","call":N,"video":"<שם הסרטון או מילים מהשם שלו, נתיב מלא אם מופיע בשיחה, או שם של סרטון שצירף>","at":["3:20"],"count":<מספר תמונות אם ביקש, אחרת 0>} לקחת תמונות מסרטון (בדרייב שמסונכרן למחשב, או שצירף) ולשים ב-PDF. at = רגעים שביקש בדיוק, תמיד בפורמט דקות:שניות ("מדקה 3:20" = ["3:20"], "בשנייה 45" = ["0:45"], "דקה 12" = ["12:00"], "שעה ועשר דקות" = ["1:10:00"]), ריק = טימי בוחר לבד את הרגעים שהכי מתאימים לשיחה.
+              בכל אחת מהשלוש: ב-reply תגיד בקצרה, בגוף ראשון, מה אתה מתחיל לעשות ("מוסיף את התמונה ל-PDF של השיחה עם ראם"), לא שסיימת: אתה מראה התקדמות ושולח את ה-PDF כשהוא מוכן. אל תשאל "באיזה סעיף" אם לא אמר: אתה בוחר לבד לפי מה שרואים בתמונה.
             - {"type":"share_hiding","on":true/false} להסתיר את טימי (הבועה וכל החלונות) כשמשתפים מסך, למשל בגוגל מיט. עכשיו: \(hideInScreenShare ? "מוסתר בשיתוף מסך" : "רואים אותו בשיתוף מסך"). כשמוסתר, טימי גם לא מופיע בצילומי מסך. "תראה את טימי בשיתוף מסך" / "אני רוצה להדגים את טימי" = on:false.
             """
         return """
@@ -2919,7 +2974,7 @@ final class TimmyChatModel: ObservableObject {
         הכי חשוב: זו שיחה רציפה, לא הודעות בודדות. תבין את ההודעה החדשה לפי כל השיחה שלמטה.
         הודעות קצרות מתייחסות למה שנאמר קודם: "כן" / "יאללה" = לעשות את מה שהצעת או שאלת. "עוד יותר" / "פחות" = אותו שינוי בדיוק, בעוצמה גדולה או קטנה יותר.
         "תחזיר" / "תחזיר את מה שהיה" / "בעצם לא" = לבטל את השינוי האחרון: קח את הערך מ"המראה לפני" שמופיע בסוגריים בהודעות של טימי, ותחזיר בדיוק אותו.
-        "גם שם" / "גם את X" = אותו שינוי על יעד נוסף. "את זה" / "אותו דבר" = הדבר האחרון שדיברנו עליו.
+        "גם שם" / "גם את X" = אותו שינוי על יעד נוסף. "את זה" / "אותו דבר" = הדבר האחרון שדיברנו עליו. אבל אם צורפו קבצים להודעה החדשה, "את זה" / "אותן" = הקבצים האלה, כולם.
         תהפוך את ההודעה לפעולות מדויקות עם ערכים מלאים (קוד צבע, טקסט הוראה מלא), ואל תשאל שאלה שהתשובה עליה כבר כתובה בשיחה.
 
         פעולות:
@@ -2937,18 +2992,49 @@ final class TimmyChatModel: ObservableObject {
         \(mem)
         מה אני זוכר על המשתמש:
         \(memoryBlock())
-        \(design ? "" : skillsBlock(t))\(design ? "" : attachmentsBlock())
+        \(design ? "" : skillsBlock(t))\(design ? "" : attachmentsBlock())\(design ? "" : callsBlock(t))
         השיחה עד עכשיו (הישנה למעלה, האחרונה למטה). מה שבסוגריים מרובעים [...] זה הערה פנימית בשבילך, אל תעתיק אותה ל-reply:
         \(history)
         ההודעה החדשה של המשתמש: "\(t)"
         """
     }
 
+    // יש לוגו ב-brand.json של ה-PDF (והקובץ קיים)
+    func savedLogoExists() -> Bool {
+        guard let d = try? Data(contentsOf: appDir.appendingPathComponent("pdf/brand.json")),
+              let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let l = o["logo"] as? String, !l.isEmpty else { return false }
+        return FileManager.default.fileExists(atPath: (l as NSString).expandingTildeInPath)
+    }
+    // השיחות השמורות (ממוספרות) והתמונות שכבר ב-PDF שלהן, רק כשהשיחה מדברת על תמונות / PDF / סרטון
+    var chatCalls: [CallItem] = []
+    func callsBlock(_ t: String) -> String {
+        let keys = ["pdf", "תמונ", "צילום", "צילומ", "סקרינשוט", "screenshot", "סרטון", "וידאו", "video", "דרייב", "drive", "כיתוב", "שיחה עם", "השיחה עם", "תמחק את", "תזיז"]
+        let recentFiles = msgs.suffix(6).flatMap { $0.files ?? [] }.map { URL(fileURLWithPath: $0) }
+        let talk = ([t] + msgs.suffix(6).map(\.text) + msgs.suffix(6).compactMap(\.ctx)).contains { s in keys.contains { s.lowercased().contains($0) } }
+            || recentFiles.contains { isImageFile($0) || isVideoFile($0) }
+        guard talk else { return "" }
+        chatCalls = Array(listCalls().prefix(30))
+        guard !chatCalls.isEmpty else { return "\nהשיחות השמורות: עוד אין שיחות." }
+        let lines = chatCalls.enumerated().map { i, c -> String in
+            var l = "\(i + 1): \(c.title)" + (c.person.isEmpty ? "" : " · עם \(c.person)") + " · " + callDateText(c.date)
+            let imgs = callImages(c.url)
+            if !imgs.isEmpty { l += " · תמונות ב-PDF: " + imgs.enumerated().map { "\($0.offset + 1)) \"\($0.element.caption)\" (\($0.element.section.isEmpty ? "בהתחלה" : "סעיף " + $0.element.section))" }.joined(separator: "; ") }
+            let secs = callSections((try? String(contentsOf: c.url, encoding: .utf8)) ?? "")
+            if !secs.isEmpty && i < 8 { l += " · סעיפים: " + secs.joined(separator: ", ") }
+            return l
+        }
+        return "\nהשיחות השמורות (מספר: כותרת · עם מי · מתי), החדשה ראשונה:\n" + lines.joined(separator: "\n")
+    }
     // קבצים שצורפו בשיחה (השמות), כדי שהבקשות "תעשה מזה סקיל" יובנו
     func attachmentsBlock() -> String {
         let f = attachedFiles
         guard !f.isEmpty else { return "" }
-        return "\nקבצים שהמשתמש צירף בשיחה (מהישן לחדש): " + f.suffix(10).map(\.lastPathComponent).joined(separator: ", ")
+        let now = currentFiles.map(\.path)
+        let older = f.filter { !now.contains($0.path) }
+        var out = ""
+        if !now.isEmpty { out += "\nקבצים שהמשתמש צירף בהודעה החדשה (\(now.count)): " + currentFiles.map(\.lastPathComponent).joined(separator: ", ") + ". \"את זה\" / \"אותן\" / \"אותם\" = כל הקבצים האלה." }
+        if !older.isEmpty { out += "\nקבצים שצירף קודם בשיחה (כבר טופלו, ואולי שייכים לשיחה עם לקוח אחר. אל תשתמש בהם אלא אם ביקש אחד מהם בשם): " + older.suffix(10).map(\.lastPathComponent).joined(separator: ", ") }
+        return out
     }
     // הסקילים המחוברים, ורשימת הסקילים במחשב רק כשהשיחה מדברת על סקילים (כדי שהפרומפט יישאר קצר)
     func skillsBlock(_ t: String) -> String {
@@ -2994,6 +3080,7 @@ final class TimmyChatModel: ObservableObject {
                     .replacingOccurrences(of: "\\s*\\[(המראה לפני|סקיל)[^\\]]*\\]", with: "", options: .regularExpression)   // הערה פנימית שהועתקה בטעות
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if let honest = res.honest { reply = honest }   // Claude אמר "חיברתי" אבל הסקיל לא נמצא: אומרים את האמת
+                else if let ir = res.imageReply { reply = ir }
                 if reply.isEmpty { reply = self.design ? "לא הבנתי מה לשנות במראה. נסה למשל: רקע כחול כהה." : "לא בטוח שהבנתי. תוכל לנסח אחרת?" }
                 // Claude ביקש "שם מדויק" או נתיב בלי להציע כלום: טימי מציע בעצמו את הסקילים שהכי מתאימים למה שנכתב
                 if !self.design, res.linked.isEmpty, !actions.contains(where: { ($0["type"] as? String) == "link_skill" }),
@@ -3014,6 +3101,7 @@ final class TimmyChatModel: ObservableObject {
                 let ctx = [self.looksCtx(before), res.ctx].compactMap { $0 }.joined(separator: ". ")
                 self.say(reply, ctx: ctx.isEmpty ? nil : ctx)
                 if let w = res.writing { self.startWritingSkill(w, replacing: res.replacing) }
+                else if let j = res.images.first { self.runImageJob(j, then: Array(res.images.dropFirst()), multi: Set(res.images.map { $0.call.url.path }).count > 1) }
                 else if restyle { self.restyleLast() } else { self.next() }
             }
         }
@@ -3031,13 +3119,17 @@ final class TimmyChatModel: ObservableObject {
     }
     // מחיל את הפעולות שטימי החליט עליהן. מחזיר: האם להחיל על השיחה האחרונה, ושורה על מה שנשמר/נמחק בזיכרון
     struct Applied { var restyle = false, note = "", honest: String? = nil, ctx: String? = nil, linked: [(String, SkillInfo)] = [], looks: [String: Any]? = nil
-        var writing: WritingSources? = nil, replacing: URL? = nil }
+        var writing: WritingSources? = nil, replacing: URL? = nil, images: [ChatImageJob] = [], imageReply: String? = nil }
     private func apply(_ actions: [[String: Any]], userText: String, replyText: String = "") -> Applied {
         var looks: [String: Any] = [:], changed = false, restyle = false, pdfText: String?
         var learned: [String] = [], forgot: [String] = []
         var linked: [(String, SkillInfo)] = [], unlinked: [String] = [], problems: [String] = []
         var catalog: [SkillInfo]?
         var writing: WritingSources?, replacing: URL?, makePDFSkill: URL?, makePDFSkillAsked = false, shareNote: String?
+        var imageJobs: [ChatImageJob] = [], imageReply: String?, pdfLogo: URL?
+        var adds: [(CallItem, [URL])] = []
+        // כמה add_images באותה תשובה ("את הראשונה לירין ואת השנייה ליוסי"): כל פעולה מקבלת רק את התמונות שבשמות שלה
+        let splitAdds = actions.filter { ($0["type"] as? String) == "add_images" }.count > 1
         for a in actions {
             let text = ((a["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             switch a["type"] as? String ?? "" {
@@ -3049,7 +3141,14 @@ final class TimmyChatModel: ObservableObject {
                 if let i = items.firstIndex(of: text) ?? items.firstIndex(where: { $0.localizedCaseInsensitiveContains(text) || text.localizedCaseInsensitiveContains($0) }) {
                     items.remove(at: i); changed = true
                 }
-            case "pdf_instruction" where !design && !text.isEmpty: pdfText = text
+            case "pdf_instruction" where !design && !text.isEmpty:
+                pdfText = text
+                // הלוגו שצורף עובר לחלון "עיצוב ה-PDF" כקובץ (לא רק כמילים), אחרת שני הצ'אטים אומרים "הוספתי" והלוגו לא שם
+                let ln = ((a["logo"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+                let batch = latestImageBatch
+                if !ln.isEmpty, let f = (batch + attachedFiles.filter(isImageFile)).first(where: { $0.lastPathComponent == ln || $0.lastPathComponent.localizedCaseInsensitiveContains(ln) }) { pdfLogo = f }
+                // בלי שם מ-Claude: רק תמונה שצורפה בהודעה הזאת עצמה ("תשים את הלוגו הזה"), לא צילום מסך מהודעה קודמת ("תגדיל את הלוגו")
+                else if text.contains("לוגו") || userText.contains("לוגו"), let f = currentFiles.first(where: isImageFile) { pdfLogo = f }
             case "apply_to_last_call" where !design:
                 // "כן" אחרי שטימי שאל אם להחיל: בודקים גם את ההודעות האחרונות בשיחה, לא רק את החדשה
                 restyle = asksLastCall(userText) || msgs.suffix(4).contains { asksLastCall($0.text) }
@@ -3068,6 +3167,48 @@ final class TimmyChatModel: ObservableObject {
                 else { problems.append("יש כמה סקילים שמתאימים ל-\(q): " + found.prefix(4).map(\.name).joined(separator: ", ") + ". איזה מהם לחבר ל\(skillPurposeName(purpose))?") }
             case "share_hiding" where !design:
                 if let on = a["on"] as? Bool, on != hideInScreenShare { setHideInScreenShare(on); shareNote = on ? "מעכשיו מי שצופה בשיתוף המסך שלך לא יראה את טימי." : "מעכשיו רואים את טימי בשיתוף מסך." }
+            case "add_images" where !design, "image_edit" where !design, "video_frames" where !design:
+                guard imageJobs.count < 6 else { break }
+                guard let c = chatCall(a["call"]) else {
+                    problems.append("לא הבנתי לאיזו שיחה. תכתוב לי עם מי הייתה השיחה, או את הנושא שלה."); break
+                }
+                let type = a["type"] as? String ?? ""
+                if type == "add_images" {
+                    let names = ((a["files"] as? [Any]) ?? []).compactMap { $0 as? String }.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                    let files = pickImagesForAdd(names: names, userText: userText, split: splitAdds)
+                    if files.isEmpty && splitAdds && !latestImageBatch.isEmpty {
+                        let list = latestImageBatch.map { "\u{2066}" + $0.lastPathComponent + "\u{2069}" }.joined(separator: ", ")
+                        let p = "לא הייתי בטוח איזו תמונה לאיזו שיחה, אז עוד לא הוספתי כלום. תכתוב לי ליד כל שיחה את שם התמונה (\(list))."
+                        if !problems.contains(p) { problems.append(p) }
+                        break
+                    }
+                    guard !files.isEmpty else { problems.append("לא מצאתי תמונה שצירפת עכשיו. תצרף אותה עם 📎 (או תגרור אותה לכאן), ותגיד לי לאיזו שיחה."); break }
+                    adds.append((c, files))
+                    // התשובה של Claude הזכירה קובץ אחר, או רק חלק מהתמונות: טימי אומר בעצמו מה בדיוק נכנס
+                    let allNames = attachedFiles.filter(isImageFile).flatMap { [$0.lastPathComponent, $0.deletingPathExtension().lastPathComponent] }.filter { $0.count >= 3 }
+                    // וגם כש-Claude ניחש משהו על כפילות ("יהיה עותק נוסף"): טימי בודק את זה בעצמו ואומר אחר כך מה באמת קרה
+                    if files.count > 1 || allNames.contains(where: { replyText.contains($0) }) || ["עותק", "כבר ", "שוב", "פעמיים", "כפול"].contains(where: { replyText.contains($0) }) {
+                        let list = files.map { "\u{2066}" + $0.lastPathComponent + "\u{2069}" }.joined(separator: ", ")
+                        imageReply = (files.count == 1 ? "מוסיף את \(list) ל-PDF של השיחה \"\(c.title)\"." : "מוסיף את \(files.count) התמונות ששלחת (\(list)) ל-PDF של השיחה \"\(c.title)\".")
+                            + (files.count == 1 ? " Claude בוחר לה מקום וכיתוב" : " Claude בוחר לכל תמונה מקום וכיתוב") + ", ואראה לך את העמוד כשה-PDF יהיה מוכן."
+                    }
+                    imageJobs.append(.add(c, files, (a["section"] as? String).flatMap { $0.isEmpty ? nil : $0 }, (a["caption"] as? String).flatMap { $0.isEmpty ? nil : $0 }, userText))
+                } else if type == "image_edit" {
+                    let n = (a["image"] as? Int) ?? (a["image"] as? String).flatMap { Int($0) } ?? 0
+                    let op = ((a["op"] as? String) ?? "").lowercased(), to = ((a["to"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+                    let e: ImageEdit? = op == "remove" ? .remove : op == "caption" ? .caption((a["caption"] as? String) ?? text)
+                        : op == "move" ? (to.lowercased() == "up" ? .up : to.lowercased() == "down" ? .down : .move(to.isEmpty ? "end" : to)) : nil
+                    guard let e, n > 0 else { problems.append("לא הבנתי מה לשנות בתמונה. אפשר למשל: \"תמחק את התמונה השנייה\" או \"תשים אותה בסוף\"."); break }
+                    // כמה שינויים באותה הודעה: כל מספר מתייחס לרשימה שלפני השינויים, אז זוכרים איזו תמונה (ולא רק את המספר)
+                    let cur = callImages(c.url)
+                    imageJobs.append(.edit(c, n - 1, e, cur.indices.contains(n - 1) ? cur[n - 1].url : nil))
+                } else {
+                    let v = ((a["video"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+                    let at = ((a["at"] as? [Any]) ?? []).map { "\($0)" }.joined(separator: " ")
+                    let count = (a["count"] as? Int) ?? (a["count"] as? String).flatMap { Int($0) } ?? 0
+                    guard !v.isEmpty || attachedFiles.contains(where: isVideoFile) else { problems.append("איזה סרטון? תכתוב לי את השם שלו (או מילה ממנו), או תצרף אותו עם 📎."); break }
+                    imageJobs.append(.video(c, v, parseTimes(at), max(0, min(8, count)), userText))
+                }
             case "unlink_skill" where !design:
                 let purpose = ((a["purpose"] as? String) ?? "").lowercased()
                 if linkedSkill(purpose) != nil { setLinkedSkill(purpose, nil); unlinked.append(purpose) }
@@ -3082,7 +3223,7 @@ final class TimmyChatModel: ObservableObject {
             case "create_writing_skill" where !design:
                 var src = WritingSources()
                 let names = ((a["files"] as? [Any]) ?? []).compactMap { $0 as? String }
-                let all = attachedFiles
+                let all = attachedFiles.filter { !isImageFile($0) && !isVideoFile($0) }   // דוגמאות כתיבה: רק מסמכים (לא תמונות או סרטונים שצורפו ל-PDF)
                 src.files = names.isEmpty ? Array(all.suffix(8)) : all.filter { f in names.contains { f.lastPathComponent == $0 || f.lastPathComponent.localizedCaseInsensitiveContains($0) } }
                 if src.files.isEmpty && !names.isEmpty { src.files = Array(all.suffix(8)) }
                 // טקסט שהמשתמש הדביק (המלא, לא המקוצר שבפרומפט): הודעות וואטסאפ קצרות שהודבקו אחת אחת נחשבות גם
@@ -3104,6 +3245,22 @@ final class TimmyChatModel: ObservableObject {
             default: break
             }
         }
+        // כמה שיחות: התשובה אומרת בדיוק איזו תמונה נכנסת לאיזו שיחה (ולא מה ש-Claude ניסח)
+        if adds.count > 1, Set(adds.map { $0.1.map(\.path) }).count == 1 {   // אותן תמונות לכמה שיחות
+            let list = adds[0].1.map { "\u{2066}" + $0.lastPathComponent + "\u{2069}" }.joined(separator: " ו-")
+            imageReply = "מוסיף את " + list + " ל-PDF של " + adds.enumerated().map { ($0.offset == 0 ? "" : "ושל ") + "השיחה \"\($0.element.0.title)\"" }.joined(separator: " ")
+                + ". Claude בוחר מקום וכיתוב בכל אחת מהן, ואשלח לך כל PDF כשהוא יהיה מוכן."
+        } else if adds.count > 1 {
+            let parts = adds.enumerated().map { i, x in
+                (i == 0 ? "" : "ואת ") + x.1.map { "\u{2066}" + $0.lastPathComponent + "\u{2069}" }.joined(separator: " ו-") + " ל-PDF של השיחה \"\(x.0.title)\""
+            }
+            imageReply = "מוסיף את " + parts.joined(separator: ", ") + ". Claude בוחר לכל תמונה מקום וכיתוב, ואשלח לך כל PDF כשהוא יהיה מוכן."
+        }
+        // הוראת PDF עוברת לחלון אחר ועוד לא קרתה: אם Claude כתב "הוספתי" / "שיניתי", טימי אומר את מה שבאמת קורה
+        if pdfText != nil, !linked.contains(where: { $0.0 == "pdf" }), imageReply == nil,
+           replyText.range(of: "(הוספתי|שמתי|שיניתי|עדכנתי|הכנסתי|החלפתי|צבעתי|הגדלתי|הקטנתי)", options: .regularExpression) != nil {
+            imageReply = "מעביר את זה לחלון \"עיצוב ה-PDF\"" + (pdfLogo != nil ? " יחד עם הלוגו שצירפת" : "") + ". שם תראה בעוד רגע איך המסמך נראה."
+        }
         if !looks.isEmpty { Theme.apply(looks) }
         if changed { saveItems() }
         if !learned.isEmpty || !forgot.isEmpty { memory = loadMemory() }
@@ -3113,7 +3270,7 @@ final class TimmyChatModel: ObservableObject {
         if let s = linked.last(where: { $0.0 == "pdf" })?.1 {
             let extra = pdfText
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: nil, adopt: s, then: extra) }
-        } else if let p = pdfText { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: p) } }
+        } else if let p = pdfText { let lg = pdfLogo; DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: p, logo: lg) } }
         // סקיל עיצוב מ-PDF: נוצר בחלון "עיצוב ה-PDF" (שם רואים את ההתקדמות ואת התוצאה)
         if makePDFSkillAsked {
             let f = makePDFSkill
@@ -3138,7 +3295,7 @@ final class TimmyChatModel: ObservableObject {
         if linked.isEmpty && !problems.isEmpty { ctx.append("סקיל: לא חיברתי, " + problems.joined(separator: " ")) }
         if !linked.isEmpty && !problems.isEmpty { note.append(contentsOf: problems) }
         return Applied(restyle: restyle, note: note.joined(separator: "\n"), honest: honest, ctx: ctx.isEmpty ? nil : ctx.joined(separator: ". "), linked: linked, looks: looks.isEmpty ? nil : looks,
-                       writing: writing, replacing: replacing)
+                       writing: writing, replacing: replacing, images: problems.isEmpty ? imageJobs : [], imageReply: problems.isEmpty ? imageReply : nil)
     }
     // סקיל ניסוח חדש: רץ ברקע עם התקדמות וכפתור "בטל", ומתחבר לניסוח בסוף
     func startWritingSkill(_ src: WritingSources, replacing: URL?) {
@@ -3168,10 +3325,168 @@ final class TimmyChatModel: ObservableObject {
             }
         }
     }
+    // אילו תמונות להוסיף: תמיד התמונות שצורפו עכשיו (או בהודעה האחרונה שצורפו בה תמונות), כולן.
+    // שם ש-Claude החזיר משמש רק כדי לבחור חלק מהן כשהמשתמש ביקש ("רק את הראשונה"). תמונה מהודעה קודמת נכנסת רק אם המשתמש כתב את השם שלה
+    // split: Claude החזיר כמה add_images באותה תשובה (כל תמונה לשיחה אחרת): אז כל פעולה מקבלת בדיוק את התמונות שבשמות שלה.
+    // מחזיר רשימה ריקה כשאי אפשר לדעת בבטחה איזו תמונה (ואז טימי שואל, ולא מכניס ללקוח תמונה של לקוח אחר)
+    func pickImagesForAdd(names: [String], userText: String, split: Bool = false) -> [URL] {
+        let batch = latestImageBatch
+        let pool = attachedFiles.filter(isImageFile)
+        func matches(_ f: URL, _ n: String) -> Bool {
+            let base = f.deletingPathExtension().lastPathComponent
+            return f.lastPathComponent == n || f.lastPathComponent.localizedCaseInsensitiveContains(n) || (base.count >= 3 && n.localizedCaseInsensitiveContains(base))
+        }
+        // השמות של Claude: מהחדש לישן (שם שחוזר בכמה הודעות = הקובץ מההודעה האחרונה), ורק אם כל שם נמצא
+        var named: [URL] = []
+        var allNamed = !names.isEmpty
+        for n in names {
+            if let f = batch.first(where: { matches($0, n) }) ?? pool.last(where: { matches($0, n) }) { if !named.contains(f) { named.append(f) } } else { allNamed = false }
+        }
+        let mentioned = { (f: URL) -> Bool in
+            let base = f.deletingPathExtension().lastPathComponent
+            return userText.localizedCaseInsensitiveContains(f.lastPathComponent) || (base.count >= 3 && userText.localizedCaseInsensitiveContains(base))
+        }
+        if split {
+            if names.isEmpty { return batch }          // "תוסיף את זה גם לירין וגם ליוסי": אותן תמונות לשתי השיחות
+            return allNamed ? named : []
+        }
+        // תמונה מהודעה קודמת שהמשתמש ביקש בשם שלה ("גם את competitor.webp")
+        let older = pool.filter { f in !batch.contains(f) && mentioned(f) }
+        let plainText = ["התמונה הזאת", "התמונה הזו", "התמונה הזה", "הצילום הזה", "הצילום הזאת"].reduce(userText) { $0.replacingOccurrences(of: $1, with: "") }
+        // המשתמש תיאר תמונה מסוימת ("התמונה של התשלום", "צילום התשלום", "תמונת הפנורמה")
+        let describes = ["התמונה של", "התמונה עם", "התמונה ה", "התמונה מ", "תמונת ה", "הצילום של", "הצילום עם", "הצילום מ", "צילום ה", "צילום המסך של", "צילום המסך עם"].contains { plainText.contains($0) }
+        // תיאור של תמונה מהודעה קודמת: Claude מזהה אותה לפי התיאור. סומכים על השמות שלו כשכולם נמצאו ולפחות אחד מהם לא מההודעה האחרונה
+        // (אם המשתמש רק כתב "את זה" בלי לתאר, נשארים עם התמונות של ההודעה האחרונה, כדי לא להכניס תמונה ישנה של לקוח אחר)
+        if describes, allNamed, !named.isEmpty, named.contains(where: { !batch.contains($0) }) { return named }
+        guard !batch.isEmpty else { return older }
+        // המשתמש ביקש חלק מהתמונות: "רק", "בלי ה…", מספר סידורי, שם של קובץ, או "התמונה של הפנורמה"
+        let exclude = ["בלי ה", "חוץ מ", "לא את ה", "מלבד"].contains { userText.contains($0) }
+        let ord: [(String, Int)] = [("הראשונה", 0), ("הראשון", 0), ("השנייה", 1), ("השניה", 1), ("השני", 1), ("השלישית", 2), ("השלישי", 2), ("האחרונה", -1), ("האחרון", -1)]
+        let ordinal = ord.first { userText.contains($0.0) }
+        let describesOne = batch.count > 1 && describes
+        let saysAll = ["התמונות", "שתיהן", "שתי התמונות", "כולן", "את כל", "אותן", "שלושתן", "כל ה"].contains { userText.contains($0) }
+        let specific = userText.contains("רק ") || exclude || ordinal != nil || describesOne || !older.isEmpty || batch.contains(where: mentioned)
+        guard specific, !(saysAll && !exclude && !userText.contains("רק ") && ordinal == nil) else { return batch + older }
+        if allNamed, !named.isEmpty { return named }
+        if let o = ordinal { let i = o.1 < 0 ? batch.count - 1 : o.1; if batch.indices.contains(i) { return [batch[i]] + older } }
+        if !exclude { let m = batch.filter(mentioned) + older; if !m.isEmpty { return m } }
+        return batch + older
+    }
+    // השיחה לפי המספר ברשימה שבפרומפט (או לפי שם, אם Claude כתב שם)
+    func chatCall(_ v: Any?) -> CallItem? {
+        if chatCalls.isEmpty { chatCalls = Array(listCalls().prefix(30)) }
+        if let n = (v as? Int) ?? (v as? String).flatMap({ Int($0.trimmingCharacters(in: .whitespaces)) }) { return chatCalls.indices.contains(n - 1) ? chatCalls[n - 1] : nil }
+        guard let q = (v as? String)?.trimmingCharacters(in: .whitespaces), !q.isEmpty else { return nil }
+        let hits = chatCalls.filter { $0.title.localizedCaseInsensitiveContains(q) || q.localizedCaseInsensitiveContains($0.title) || (!$0.person.isEmpty && q.localizedCaseInsensitiveContains($0.person)) }
+        return hits.count == 1 ? hits[0] : nil
+    }
+    // תמונות ב-PDF של שיחה: רץ ברקע עם התקדמות ו"בטל", ובסוף ה-PDF המעודכן עם תצוגה של העמוד שבו התמונה
+    // then: עוד עבודות מאותה הודעה ("את הראשונה לירין, ואת השנייה ליוסי"), אחת אחרי השנייה. "בטל" עוצר גם אותן
+    func runImageJob(_ job: ChatImageJob, then rest: [ChatImageJob] = [], multi: Bool = false) {
+        let c = job.call
+        let more = { if let j = rest.first { self.runImageJob(j, then: Array(rest.dropFirst()), multi: multi) } else { self.next() } }
+        let inCall = { (m: String) in multi ? "בשיחה \"\(c.title)\": " + m : m }   // כמה שיחות באותה הודעה: כל תשובה אומרת על איזו מהן
+        if restylingPaths.contains(c.url.path) || imageBusyPaths.contains(c.url.path) {
+            say(restylingPaths.contains(c.url.path) ? "אני משכתב עכשיו את הסיכום של השיחה \"\(c.title)\". תבקש שוב בעוד רגע, ואעשה את זה." : "אני באמצע לשנות תמונות בשיחה \"\(c.title)\" בחלון \"השיחות שלי\". תבקש שוב כשזה ייגמר.", error: true)
+            more(); return
+        }
+        imageBusyPaths.insert(c.url.path)
+        let token = CancelToken()
+        cancelAction = { [weak self] in token.cancel(); self?.busy = "מבטל…" }
+        busy = { if case .video = job { return "פותח את הסרטון…" }; return "מכין את התמונות…" }()
+        let attachedVideos = attachedFiles.filter(isVideoFile)
+        let t0 = Date()
+        DispatchQueue.global().async {
+            let prog: (String) -> Void = { t in DispatchQueue.main.async { if !token.isCancelled, self.busy != nil { self.busy = t } } }
+            var r = ImgOutcome()
+            var focus: [URL] = []   // התמונות שהפעולה הזאת נגעה בהן, כדי ש"אותה" בהודעה הבאה יובן
+            switch job {
+            case .add(_, let files, let section, let caption, let req):
+                r = addImagesToCall(md: c.url, files: files, target: section, caption: caption, request: req, token: token, progress: prog)
+            case .edit(_, let n, let e, let was):
+                let before = callImages(c.url)
+                // שינוי קודם באותה הודעה הזיז את המספרים: מחפשים את התמונה עצמה
+                let i = was.flatMap { u in before.firstIndex { $0.url.path == u.path } } ?? (was == nil ? n : -1)
+                if i < 0 { r.message = "התמונה הזאת כבר לא ב-PDF."; break }
+                if before.indices.contains(i), e != .remove { focus = [before[i].url] }
+                if let err = editCallImage(md: c.url, index: i, e) { r.message = err } else {
+                    r.ok = true
+                    switch e {
+                    case .remove: r.message = "הוצאתי את התמונה מה-PDF."
+                    case .caption: r.message = "שיניתי את הכיתוב."
+                    default:
+                        let im = callImages(c.url)
+                        r.message = "הזזתי את התמונה." + (im.isEmpty ? "" : "")
+                    }
+                }
+            case .video(_, let q, let at, let count, let req):
+                r = resolveVideo(q, attached: attachedVideos, progress: prog)
+                if r.choices.isEmpty, r.message.isEmpty, let v = r.md {
+                    r = videoFramesToCall(md: c.url, video: v, at: at, count: count, request: req, token: token, progress: prog)
+                }
+            }
+            DispatchQueue.main.async {
+                imageBusyPaths.remove(c.url.path)   // הסיכום כבר נכתב. ה-PDF שנבנה עכשיו רק קורא אותו
+                let done: (Bool) -> Void = { ok in if rest.isEmpty || r.cancelled || token.isCancelled { demoFinished(["flow": "chat-images", "ok": ok, "message": r.message, "seconds": Int(Date().timeIntervalSince(t0)),
+                                                                  "images": callImages(c.url).map { ["caption": $0.caption, "section": $0.section] }]) } }
+                if r.cancelled || token.isCancelled {
+                    self.cancelAction = nil; self.busy = nil
+                    self.say(rest.isEmpty ? "ביטלתי. שום דבר לא השתנה ב-PDF." : "ביטלתי. ב-PDF של \"\(c.title)\" שום דבר לא השתנה, ואת שאר מה שביקשת בהודעה הזאת לא התחלתי.", ctx: "תמונות: בוטל באמצע"); done(false); self.next(); return
+                }
+                if !r.choices.isEmpty {
+                    self.cancelAction = nil; self.busy = nil
+                    self.say("מצאתי בדרייב כמה סרטונים שמתאימים:\n" + r.choices.enumerated().map { videoChoiceLine($0.element, $0.offset) }.joined(separator: "\n") + "\nמאיזה מהם לקחת תמונות?",
+                             ctx: "סרטונים שהצעתי (כדי לבחור, החזר video עם הנתיב המלא): " + r.choices.enumerated().map { "\($0.offset + 1)) \($0.element.path)" }.joined(separator: "; ")
+                                + ". השיחה: \(c.title)")
+                    done(false); more(); return
+                }
+                guard r.ok else {
+                    self.cancelAction = nil; self.busy = nil
+                    self.say(inCall(r.message), error: true, ctx: "תמונות: לא הצלחתי (שיחה: \(c.title))"); done(false); more(); return
+                }
+                // כל התמונות כבר היו ב-PDF של השיחה: לא בונים אותו מחדש
+                if case .add = job, r.added.isEmpty {
+                    self.cancelAction = nil; self.busy = nil
+                    self.say(inCall(r.message), ctx: "תמונות: שיחה \"\(c.title)\". " + imagesSummaryLine(c.url)); done(true); more(); return
+                }
+                self.busy = "מכין את ה-PDF…"
+                buildPDF(md: c.url, dest: c.pdfURL, token: token) { ok, _, note in
+                    self.cancelAction = nil; self.busy = nil
+                    let now = callImages(c.url)
+                    let touched = (focus + r.added.map(\.url)).compactMap { u in now.firstIndex { $0.url.path == u.path } }.map { "מספר \($0 + 1)" }
+                    let ctx = "תמונות: שיחה \"\(c.title)\". " + (touched.isEmpty ? "" : "התמונה שדיברנו עליה עכשיו (\"אותה\"): " + touched.joined(separator: ", ") + ". ") + imagesSummaryLine(c.url)
+                    if token.isCancelled {
+                        self.say(inCall(joinStatus(r.message, "ביטלתי את הכנת ה-PDF. השינוי נשמר בסיכום, ואפשר ללחוץ \"הורד PDF\" בחלון \"השיחות שלי\" מתי שרוצים.")) + (rest.isEmpty ? "" : "\nאת שאר מה שביקשת בהודעה הזאת לא התחלתי."), ctx: ctx)
+                        if rest.isEmpty { done(false) } else { demoFinished(["flow": "chat-images", "ok": false, "cancelled": true]) }
+                        self.next(); return
+                    }
+                    guard ok else {
+                        self.say(inCall(r.message) + "\nאבל לא הצלחתי להכין את ה-PDF עכשיו. אפשר ללחוץ \"הורד PDF\" בחלון \"השיחות שלי\".", error: true, ctx: ctx); done(false); more(); return
+                    }
+                    let dir = appDir.appendingPathComponent("chat-previews")
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    let png = dir.appendingPathComponent("page-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+                    let probe = r.added.first?.caption ?? callImages(c.url).first?.caption
+                    let shown = pdfPagePNG(c.pdfURL, containing: probe, to: png)
+                    var text = joinStatus(inCall(r.message), "ה-PDF מוכן" + (shown ? " (לחיצה על התמונה פותחת אותו)." : "."))
+                    if let note, note.hasPrefix("לא הצלחתי להפעיל את הסקיל") || note.hasPrefix("לא מצאתי") { text += "\n(" + note + ")" }
+                    if case .add = job, r.added.count > 0 { text += "\nאפשר לבקש ממני להזיז, למחוק או לשנות כיתוב." }
+                    self.msgs.append(ChatMsg(fromUser: false, text: text, image: shown ? png.path : nil, pdf: c.pdfURL.path, ctx: ctx)); self.save()
+                    CallsRefresh.post()
+                    done(true); more()
+                }
+            }
+        }
+    }
     // מחיל את ההוראות על הסיכום האחרון (live.py --restyle)
     private func restyleLast() {
         guard !items.isEmpty else { say("עוד אין לי הוראות להחיל."); next(); return }
         guard let md = lastSummaryFile() else { say("עוד אין שיחות שמורות, אז אין על מה להחיל."); next(); return }
+        if imageBusyPaths.contains(md.path) {   // מוסיפים עכשיו תמונות לשיחה הזאת: מחכים שזה ייגמר ואז משכתבים
+            busy = "מחכה שהתמונות ייכנסו לסיכום, ואז מחיל על השיחה האחרונה…"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.restyleLast() }
+            return
+        }
         busy = "מחיל על השיחה האחרונה…"
         restylingPaths.insert(md.path)
         let p = Process(); p.executableURL = URL(fileURLWithPath: python)
@@ -3190,8 +3505,41 @@ final class TimmyChatModel: ObservableObject {
         do { try p.run() } catch { busy = nil; restylingPaths.remove(md.path); say("שגיאה בהפעלה", error: true); next() }
     }
 }
+enum ChatImageJob {
+    case add(CallItem, [URL], String?, String?, String), edit(CallItem, Int, ImageEdit, URL?), video(CallItem, String, [Double], Int, String)
+    var call: CallItem {
+        switch self { case .add(let c, _, _, _, _), .edit(let c, _, _, _), .video(let c, _, _, _, _): return c }
+    }
+}
+// חלון "השיחות שלי" מתרענן כשהצ'אט שינה תמונות (הסיכום השתנה)
+enum CallsRefresh { static func post() { NotificationCenter.default.post(name: Notification.Name("timmy.callsChanged"), object: nil) } }
+// הסרטון שהמשתמש התכוון אליו: מצורף / נתיב / חיפוש בדרייב. r.md = הסרטון, r.choices = כמה מתאימים, r.message = שגיאה
+func resolveVideo(_ q: String, attached: [URL], progress: (String) -> Void) -> ImgOutcome {
+    var r = ImgOutcome()
+    let p = (q as NSString).expandingTildeInPath
+    if p.hasPrefix("/"), FileManager.default.fileExists(atPath: p) { r.md = URL(fileURLWithPath: p); return r }
+    if let a = attached.last(where: { q.isEmpty || $0.lastPathComponent.localizedCaseInsensitiveContains(q) || q.localizedCaseInsensitiveContains($0.deletingPathExtension().lastPathComponent) }) { r.md = a; return r }
+    if q.isEmpty, let a = attached.last { r.md = a; return r }
+    let roots = driveRoots()
+    guard !roots.isEmpty else {
+        r.message = "לא מצאתי במחשב את התיקייה של Google Drive, אז אני לא יכול לחפש בו. אפשר להתקין את Google Drive לשולחן העבודה (ואז הדרייב מופיע ב-Finder), או לצרף לי את הסרטון עם 📎, או לבחור אותו ב\"השיחות שלי\" ← \"תמונות מסרטון…\"."
+        return r
+    }
+    progress("מחפש את הסרטון בדרייב…")
+    let m = searchDriveVideos(q, roots: roots)
+    guard let top = m.first else {
+        r.message = "לא מצאתי בדרייב סרטון שמתאים ל\"\(q)\". תכתוב לי עוד מילה מהשם של הקובץ, או תבחר אותו בעצמך ב\"השיחות שלי\" ← \"תמונות מסרטון…\"."
+        return r
+    }
+    let close = m.dropFirst().filter { $0.score >= top.score - 1.5 }
+    if close.isEmpty { r.md = top.url } else { r.choices = [top.url] + close.prefix(4).map(\.url) }
+    return r
+}
 // סיכומים ש-live.py --restyle משכתב עכשיו (רק מה-main thread): לא משנים להם שם באמצע, אחרת הכתיבה חוזרת לשם הישן
 var restylingPaths = Set<String>()
+// סיכומים שמוסיפים / משנים להם עכשיו תמונות (מחלון "השיחות שלי" או מהצ'אט, רק מה-main thread): שכתוב (--restyle) מחכה שזה ייגמר,
+// אחרת הוא כותב בחזרה את הטקסט שקרא בהתחלה, והתמונה החדשה נעלמת מהסיכום
+var imageBusyPaths = Set<String>()
 // הסיכום האחרון בתיקיית ההקלטות
 func lastSummaryFile() -> URL? {
     let fm = FileManager.default
@@ -3274,7 +3622,7 @@ struct TimmyChatInput: View {
                 HStack(spacing: 6) {
                     ForEach(m.attachments, id: \.self) { u in
                         HStack(spacing: 5) {
-                            Image(systemName: "doc").font(.system(size: 10, weight: .semibold)).foregroundColor(amber)
+                            Image(systemName: isImageFile(u) ? "photo" : (isVideoFile(u) ? "film" : "doc")).font(.system(size: 10, weight: .semibold)).foregroundColor(amber)
                             Text(u.lastPathComponent).font(.system(size: 11.5)).foregroundColor(ink.opacity(0.85)).lineLimit(1).truncationMode(.middle)
                                 .environment(\.layoutDirection, .leftToRight)
                             Button(action: { m.attachments.removeAll { $0 == u } }) {
@@ -3295,7 +3643,7 @@ struct TimmyChatInput: View {
             if !m.design {
                 Button(action: { m.attach() }) {
                     Text("📎").font(.system(size: 16)).frame(width: 38, height: 38).background(Circle().fill(ink.opacity(0.08)))
-                }.buttonStyle(.plain).help("צרף קבצים: דוגמאות של איך שאתה כותב, או PDF שאתה אוהב את העיצוב שלו")
+                }.buttonStyle(.plain).help("צרף קבצים: צילומי מסך ל-PDF של שיחה, סרטון, דוגמאות של איך שאתה כותב, או PDF שאתה אוהב את העיצוב שלו")
             }
             RTLField(placeholder: m.design ? "למשל: עיניים ירוקות, רקע כחול כהה" : "תכתוב לטימי מה לשנות…", text: $m.input, onSubmit: { m.send() })
                 .padding(.vertical, 10).padding(.horizontal, 14)
@@ -4426,10 +4774,15 @@ func runClaude(_ args: [String], input: String? = nil, timeout: TimeInterval = 1
     return runProcess(path, args, input: input, timeout: timeout, token: token)
 }
 // Claude עם תמונות (עמודי PDF), בלי שום כלי: ההודעה עוברת כ-stream-json עם בלוקים של תמונה. מחזיר את הטקסט של התשובה
-func runClaudeWithImages(_ prompt: String, images: [URL], model: String, timeout: TimeInterval, token: CancelToken?) -> (text: String?, r: ProcResult) {
-    var content: [[String: Any]] = images.compactMap { u in
-        guard let d = try? Data(contentsOf: u) else { return nil }
-        return ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": d.base64EncodedString()]]
+// labels: טקסט קצר לפני כל תמונה ("תמונה 3 (דקה 4:10):"), כדי ש-Claude לא יתבלבל בספירה כשיש הרבה תמונות דומות
+func runClaudeWithImages(_ prompt: String, images: [URL], labels: [String]? = nil, model: String, timeout: TimeInterval, token: CancelToken?) -> (text: String?, r: ProcResult) {
+    var content: [[String: Any]] = []
+    for (i, u) in images.enumerated() {
+        guard let d = try? Data(contentsOf: u) else { continue }
+        let ext = u.pathExtension.lowercased()
+        let mime = ["jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"][ext] ?? "image/png"
+        if let labels, labels.indices.contains(i) { content.append(["type": "text", "text": labels[i]]) }
+        content.append(["type": "image", "source": ["type": "base64", "media_type": mime, "data": d.base64EncodedString()]])
     }
     content.append(["type": "text", "text": prompt])
     let msg: [String: Any] = ["type": "user", "message": ["role": "user", "content": content]]
@@ -4471,6 +4824,7 @@ func plainWikilinks(_ s: String) -> String {
 
 enum MDBlock: Hashable {
     case heading(Int, String), para(String), bullet(String, Int), task(Bool, String), numbered(String, String), table([[String]]), quote(String), rule
+    case image(String, String)   // כיתוב, נתיב (כמו שכתוב בסיכום: יחסי לתיקיית הסיכום)
 }
 func mdTableRow(_ t: String) -> [String] {
     var r = t.replacingOccurrences(of: "\\|", with: "\u{0}")
@@ -4494,7 +4848,8 @@ func parseMarkdown(_ text: String) -> [MDBlock] {
         flushTable()
         if t.isEmpty { flushPara(); continue }
         let indent = line.prefix { $0 == " " || $0 == "\t" }.count / 2
-        if let g = rxGroups(t, "^(#{1,6})\\s+(.*)$") { flushPara(); blocks.append(.heading(g[1].count, g[2])) }
+        if let im = parseImageLine(t) { flushPara(); blocks.append(.image(im.caption, im.path)) }
+        else if let g = rxGroups(t, "^(#{1,6})\\s+(.*)$") { flushPara(); blocks.append(.heading(g[1].count, g[2])) }
         else if let g = rxGroups(t, "^[-*+]\\s+\\[([ xX])\\]\\s+(.*)$") { flushPara(); blocks.append(.task(g[1] != " ", g[2])) }
         else if t.range(of: "^(-{3,}|\\*{3,}|_{3,})$", options: .regularExpression) != nil { flushPara(); blocks.append(.rule) }
         else if let g = rxGroups(t, "^[-*+•]\\s+(.*)$") { flushPara(); blocks.append(.bullet(g[1], indent)) }
@@ -4532,6 +4887,7 @@ struct MDBlockView: View {
         case .table(let rows): MDTable(rows: rows)
         case .quote(let t): MDQuote(text: t)
         case .rule: Rectangle().fill(ink.opacity(0.1)).frame(height: 1).padding(.vertical, 6)
+        case .image(let cap, let path): MDImage(caption: cap, path: path)
         }
     }
 }
@@ -4542,6 +4898,34 @@ struct MDText: View {
             .lineSpacing(5).tint(amber)
             .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
+    }
+}
+// תמונה בסיכום (צילום מסך / תמונה מסרטון): תמונה מוקטנת וכיתוב מתחת
+let thumbCache = NSCache<NSString, NSImage>()
+func thumbImage(_ path: String, maxSide: Int = 900) -> NSImage? {
+    let mod = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    let key = "\(path)@\(mod)" as NSString
+    if let i = thumbCache.object(forKey: key) { return i }
+    guard let cg = loadImageScaled(URL(fileURLWithPath: path), maxSide: maxSide) else { return nil }
+    let i = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    thumbCache.setObject(i, forKey: key)
+    return i
+}
+struct MDImage: View {
+    let caption: String, path: String
+    var body: some View {
+        VStack(spacing: 6) {
+            if let img = thumbImage(path) {
+                Image(nsImage: img).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: 520, maxHeight: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(ink.opacity(0.12), lineWidth: 1))
+            } else {
+                Label(he("התמונה לא נמצאה"), systemImage: "photo").font(.system(size: 12)).foregroundColor(ink.opacity(0.45))
+            }
+            if !caption.isEmpty { Text(he(caption)).font(.system(size: 12)).foregroundColor(ink.opacity(0.6)).multilineTextAlignment(.center) }
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 struct MDHeading: View {
@@ -4778,11 +5162,14 @@ func renamedBase(_ c: CallItem, _ title: String) -> String {
     return (stamp.map { $0 + " " } ?? "") + prefix + title
 }
 // שורת הכותרת ושורת "תמלול מלא" בתוך הסיכום
-func retitledMarkdown(_ text: String, title: String, newBase: String) -> String {
+func retitledMarkdown(_ text: String, title: String, newBase: String, oldBase: String? = nil) -> String {
     var lines = text.components(separatedBy: "\n"), headed = false
+    let oldImgs = oldBase.map { $0 + imagesFolderSuffix + "/" }, newImgs = newBase + imagesFolderSuffix + "/"
     for i in lines.indices {
         if !headed && lines[i].hasPrefix("# ") { lines[i] = "# " + title; headed = true }
         else if lines[i].hasPrefix("תמלול מלא:") { lines[i] = "תמלול מלא: " + newBase + " - תמלול.txt" }
+        // תמונות ב-PDF: התיקייה שלהן זזה יחד עם השם, אז גם הנתיב בשורה
+        else if let o = oldImgs, let im = parseImageLine(lines[i]), im.path.hasPrefix(o) { lines[i] = imageMDLine(im.caption, newImgs + im.path.dropFirst(o.count)) }
     }
     return lines.joined(separator: "\n")
 }
@@ -4901,17 +5288,31 @@ func injectTimmyFooter(_ html: String) -> String {
     var h = html
     // 0. data: URI ארוך (פונט מוטמע, לוגו) יוצא מהדרך לפני הביטויים הרגולריים, וחוזר בסוף.
     //    ריצה ארוכה בלי {}<> הופכת את הביטוי השלישי לריבועי: פונט של 360KB תקע את יצירת ה-PDF לדקות ארוכות
+    //    סריקה ידנית ולא NSRegularExpression: על data: URI של יותר ממגהבייט (תמונה ב-PDF) ICU מחזיר "אין התאמה" בשקט,
+    //    ואז הביטויים שלמטה רצים על כל ה-base64 ונתקעים
     var stash: [String] = []
-    if let re = try? NSRegularExpression(pattern: "data:[A-Za-z0-9.+/-]++;base64,[A-Za-z0-9+/=]++") {
-        let ns = h as NSString
-        var out = "", last = 0
-        for m in re.matches(in: h, range: NSRange(location: 0, length: ns.length)) where m.range.length >= 200 {
-            out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
-            out += "__timmy_data_\(stash.count)__"
-            stash.append(ns.substring(with: m.range))
-            last = m.range.location + m.range.length
+    do {
+        let b = Array(h.utf8), pre = Array("data:".utf8), mid = Array(";base64,".utf8)
+        func alnum(_ c: UInt8) -> Bool { (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) }
+        var out: [UInt8] = [], i = 0, last = 0
+        out.reserveCapacity(b.count / 4)
+        while i + pre.count <= b.count {
+            if b[i] == 0x64, b[i..<(i + pre.count)].elementsEqual(pre) {
+                var j = i + pre.count
+                while j < b.count, alnum(b[j]) || b[j] == 0x2E || b[j] == 0x2B || b[j] == 0x2F || b[j] == 0x2D { j += 1 }
+                if j + mid.count <= b.count, b[j..<(j + mid.count)].elementsEqual(mid) {
+                    var k = j + mid.count
+                    while k < b.count, alnum(b[k]) || b[k] == 0x2B || b[k] == 0x2F || b[k] == 0x3D { k += 1 }
+                    if k - i >= 200 {
+                        out += b[last..<i]; out += Array("__timmy_data_\(stash.count)__".utf8)
+                        stash.append(String(decoding: b[i..<k], as: UTF8.self))
+                        last = k; i = k; continue
+                    }
+                }
+            }
+            i += 1
         }
-        if !stash.isEmpty { h = out + ns.substring(from: last) }
+        if !stash.isEmpty { out += b[last...]; h = String(decoding: out, as: UTF8.self) }
     }
     // 1. כל מה שמגיע מהתבנית / מ-Claude ומכוון לשורה (אלמנט בשם הזה, או CSS שמסתיר אותה) נמחק
     h = h.replacingOccurrences(of: "<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*timmy-footer[^>]*>[\\s\\S]*?</\\1\\s*>", with: "", options: [.regularExpression, .caseInsensitive])
@@ -5027,6 +5428,7 @@ func swiftFallbackHTML(_ md: String) -> String {
         case .task(_, let t): out += "<p>☐ \(esc(t))</p>"
         case .table(let rows): out += "<table>" + rows.map { "<tr>" + $0.map { "<td>\(esc($0))</td>" }.joined() + "</tr>" }.joined() + "</table>"
         case .rule: out += "<hr>"
+        case .image(let cap, _): if !cap.isEmpty { out += "<p style=\"text-align:center;color:#888\">\(esc(cap))</p>" }
         }
     }
     let a = Theme.accentHex
@@ -5051,6 +5453,10 @@ func buildPDF(md: URL, dest: URL, local: Bool = false, preview: Bool = false, to
         try? FileManager.default.removeItem(at: tmp)
         let usedClaude = o["claude"] as? Bool ?? false
         var note = o["error"] as? String
+        // שורת תמונה שהקובץ שלה נעלם: לא נכנסת ל-PDF, אבל אומרים את זה
+        if let miss = o["missing_images"] as? Int, miss > 0, note == nil {
+            note = "לא מצאתי את הקובץ של " + (miss == 1 ? "תמונה אחת" : "\(miss) תמונות") + " מהסיכום (אולי נמחק או הועבר), אז " + (miss == 1 ? "היא לא נכנסה" : "הן לא נכנסו") + " ל-PDF."
+        }
         let contact = o["footer"] as? String ?? ""
         // סקיל PDF שמייצר PDF בעצמו: הקובץ כבר מוכן (מהסקריפט של הסקיל). רק מוסיפים את שורת טימי בסוף
         if let p = o["pdf"] as? String, !p.isEmpty, FileManager.default.fileExists(atPath: p) {
@@ -5088,6 +5494,871 @@ func pdfFirstPagePNG(_ pdf: URL, to png: URL, width: CGFloat = 900) -> Bool {
     guard let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
           let data = rep.representation(using: .png, properties: [:]) else { return false }
     return (try? data.write(to: png)) != nil
+}
+
+// MARK: - תמונות ב-PDF של שיחה: צילומי מסך שהמשתמש מוסיף, ותמונות מתוך סרטון (גם סרטון מהדרייב)
+// התמונות נשמרות בתיקייה "<שם השיחה> - תמונות" שליד הסיכום (עותק מוקטן, אף פעם לא הקובץ המקורי),
+// ובסיכום עצמו כשורה משלה: ![כיתוב](<שם השיחה> - תמונות/img-xxxx.jpg). שני המעצבים (של טימי ושל הסקיל) קוראים את השורה הזאת.
+
+let imageFileExts: Set<String> = ["png", "jpg", "jpeg", "heic", "heif", "webp", "gif", "tif", "tiff", "bmp"]
+let videoFileExts: Set<String> = ["mp4", "mov", "m4v", "avi", "mkv", "webm", "mpg", "mpeg", "3gp", "wmv", "mts", "m2ts"]
+func isImageFile(_ u: URL) -> Bool { imageFileExts.contains(u.pathExtension.lowercased()) }
+func isVideoFile(_ u: URL) -> Bool { videoFileExts.contains(u.pathExtension.lowercased()) }
+let imagesFolderSuffix = " - תמונות"
+func callImagesDir(_ md: URL) -> URL {
+    md.deletingLastPathComponent().appendingPathComponent(md.deletingPathExtension().lastPathComponent + imagesFolderSuffix, isDirectory: true)
+}
+
+struct CallImage: Equatable, Hashable {
+    let line: Int, caption: String, rel: String, url: URL, section: String
+}
+func parseImageLine(_ l: String) -> (caption: String, path: String)? {
+    guard let g = rxGroups(l.trimmingCharacters(in: .whitespaces), "^!\\[([^\\]\\n]*)\\]\\((.+)\\)$") else { return nil }
+    var p = g[2].trimmingCharacters(in: .whitespaces)
+    if p.hasPrefix("<"), p.hasSuffix(">") { p = String(p.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces) }
+    if p.contains("%"), let d = p.removingPercentEncoding { p = d }
+    return (g[1].trimmingCharacters(in: .whitespaces), p)
+}
+func isSectionHeading(_ l: String) -> Bool { l.hasPrefix("## ") }
+func headingText(_ l: String) -> String { String(l.drop { $0 == "#" }).trimmingCharacters(in: .whitespaces) }
+func callImages(_ md: URL) -> [CallImage] {
+    callImages(text: (try? String(contentsOf: md, encoding: .utf8)) ?? "", dir: md.deletingLastPathComponent())
+}
+func callImages(text: String, dir: URL) -> [CallImage] {
+    var out: [CallImage] = [], sec = ""
+    for (i, l) in text.components(separatedBy: "\n").enumerated() {
+        if isSectionHeading(l) { sec = headingText(l) }
+        guard let im = parseImageLine(l) else { continue }
+        let p = (im.path as NSString).expandingTildeInPath
+        let u = p.hasPrefix("/") ? URL(fileURLWithPath: p) : dir.appendingPathComponent(p)
+        out.append(CallImage(line: i, caption: im.caption, rel: im.path, url: u, section: sec))
+    }
+    return out
+}
+func callSections(_ text: String) -> [String] { text.components(separatedBy: "\n").filter(isSectionHeading).map(headingText) }
+// כיתוב שלא שובר את שורת ה-Markdown
+func cleanCaption(_ s: String) -> String {
+    var t = s.replacingOccurrences(of: "[\\[\\]\\r\\n\\t]", with: " ", options: .regularExpression)
+        .replacingOccurrences(of: "—", with: "-").replacingOccurrences(of: " {2,}", with: " ", options: .regularExpression)
+        .trimmingCharacters(in: .whitespaces)
+    if t.hasPrefix("\""), t.hasSuffix("\""), t.count > 1 { t = String(t.dropFirst().dropLast()) }
+    if t.hasSuffix(".") && !t.hasSuffix("..") { t.removeLast() }
+    return String(t.prefix(180))
+}
+func imageMDLine(_ caption: String, _ rel: String) -> String { "![\(cleanCaption(caption))](\(rel))" }
+
+func normWords(_ s: String) -> [String] {
+    s.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count > 1 }
+}
+// הסעיף שהכי מתאים לשם שנכתב (Claude / המשתמש): זהה, מוכל, או רוב המילים
+func matchSection(_ want: String, in sections: [String]) -> String? {
+    let w = headingText(want).trimmingCharacters(in: CharacterSet(charactersIn: "\"'״׳ "))
+    guard !w.isEmpty else { return nil }
+    let n = normWords(w).joined(separator: " ")
+    if let s = sections.first(where: { normWords($0).joined(separator: " ") == n }) { return s }
+    if let s = sections.first(where: { let x = normWords($0).joined(separator: " "); return !x.isEmpty && !n.isEmpty && (x.contains(n) || n.contains(x)) }) { return s }
+    let ww = Set(normWords(w))
+    let scored = sections.map { s -> (String, Double) in
+        let sw = Set(normWords(s)); guard !sw.isEmpty, !ww.isEmpty else { return (s, 0) }
+        return (s, Double(sw.intersection(ww).count) / Double(min(sw.count, ww.count)))
+    }.filter { $0.1 >= 0.5 }.sorted { $0.1 > $1.1 }
+    return scored.first?.0
+}
+func isStartTarget(_ t: String) -> Bool { ["start", "top", "התחלה", "בהתחלה", "ההתחלה", "למעלה", "בראש"].contains(t.trimmingCharacters(in: .whitespaces).lowercased()) }
+func isEndTarget(_ t: String) -> Bool { ["end", "bottom", "סוף", "בסוף", "הסוף", "למטה", "סוף", "סוף המסמך"].contains(t.trimmingCharacters(in: .whitespaces).lowercased()) }
+
+// מכניס שורות תמונה: בסוף הסעיף (target = שם סעיף), בהתחלה (לפני הסעיף הראשון), או בסוף המסמך (לפני "תמלול מלא:")
+func insertingImageLines(_ text: String, _ lines: [String], target: String?) -> String {
+    var ls = text.components(separatedBy: "\n")
+    let tail = ls.firstIndex { $0.hasPrefix("תמלול מלא:") } ?? ls.count
+    var idx = tail
+    let t = (target ?? "").trimmingCharacters(in: .whitespaces)
+    if isStartTarget(t) {
+        idx = ls.firstIndex(where: isSectionHeading) ?? tail
+    } else if !t.isEmpty, !isEndTarget(t), let s = matchSection(t, in: callSections(text)),
+              let h = ls.firstIndex(where: { isSectionHeading($0) && headingText($0) == s }) {
+        var j = h + 1
+        while j < ls.count && !ls[j].hasPrefix("# ") && !isSectionHeading(ls[j]) && !ls[j].hasPrefix("תמלול מלא:") { j += 1 }
+        idx = j
+    }
+    while idx > 0 && ls[idx - 1].trimmingCharacters(in: .whitespaces).isEmpty { idx -= 1 }
+    var block: [String] = []
+    for l in lines { block += ["", l] }
+    block.append("")
+    ls.insert(contentsOf: block, at: idx)
+    return tidyBlankLines(ls.joined(separator: "\n"))
+}
+func tidyBlankLines(_ s: String) -> String {
+    s.replacingOccurrences(of: "\n[ \t]*\n([ \t]*\n)+", with: "\n\n", options: .regularExpression)
+}
+func writeAtomic(_ text: String, _ url: URL) -> Bool { (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil }
+
+// MARK: שמירת תמונה: עותק מוקטן (עד 2000 פיקסלים), HEIC/WebP/GIF -> JPEG או PNG, לפי הסיבוב של המצלמה
+struct ImgErr: Error { let msg: String }
+func encodeImage(_ cg: CGImage, jpeg: Bool, quality: Double = 0.86) -> Data? {
+    var img = cg
+    if jpeg, cg.alphaInfo != .none, cg.alphaInfo != .noneSkipFirst, cg.alphaInfo != .noneSkipLast,
+       let ctx = CGContext(data: nil, width: cg.width, height: cg.height, bitsPerComponent: 8, bytesPerRow: 0,
+                           space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) {
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+        if let flat = ctx.makeImage() { img = flat }
+    }
+    let data = NSMutableData()
+    guard let dst = CGImageDestinationCreateWithData(data as CFMutableData, (jpeg ? UTType.jpeg : UTType.png).identifier as CFString, 1, nil) else { return nil }
+    CGImageDestinationAddImage(dst, img, (jpeg ? [kCGImageDestinationLossyCompressionQuality: quality] : [:]) as CFDictionary)
+    return CGImageDestinationFinalize(dst) ? data as Data : nil
+}
+func loadImageScaled(_ src: URL, maxSide: Int) -> CGImage? {
+    guard let s = CGImageSourceCreateWithURL(src as CFURL, nil), CGImageSourceGetCount(s) > 0 else { return nil }
+    let props = CGImageSourceCopyPropertiesAtIndex(s, 0, nil) as? [CFString: Any] ?? [:]
+    let w = props[kCGImagePropertyPixelWidth] as? Int ?? 0, h = props[kCGImagePropertyPixelHeight] as? Int ?? 0
+    let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                                 kCGImageSourceShouldCacheImmediately: true,
+                                 kCGImageSourceThumbnailMaxPixelSize: max(1, min(maxSide, max(w, h) > 0 ? max(w, h) : maxSide))]
+    return CGImageSourceCreateThumbnailAtIndex(s, 0, opts as CFDictionary)
+}
+func storeImage(_ src: URL, in dir: URL, maxSide: Int = 2000, name base: String? = nil) -> Result<URL, ImgErr> {
+    let name = src.lastPathComponent
+    guard let cg = loadImageScaled(src, maxSide: maxSide) else { return .failure(ImgErr(msg: "לא הצלחתי לפתוח את \u{2066}\(name)\u{2069} כתמונה")) }
+    if min(cg.width, cg.height) < 16 { return .failure(ImgErr(msg: "התמונה \u{2066}\(name)\u{2069} קטנה מדי")) }
+    let ext = src.pathExtension.lowercased()
+    var jpeg = !["png", "gif", "bmp", "tif", "tiff"].contains(ext)
+    var data = encodeImage(cg, jpeg: jpeg)
+    if !jpeg, let d = data, d.count > 1_800_000 { jpeg = true; data = encodeImage(cg, jpeg: true, quality: 0.88) }   // צילום מסך ענק: JPEG שומר את ה-PDF קל
+    guard let data else { return .failure(ImgErr(msg: "לא הצלחתי לשמור את \u{2066}\(name)\u{2069}")) }
+    do {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let rnd = String(UUID().uuidString.prefix(8)).lowercased()
+        let dst = dir.appendingPathComponent((base.map { $0 + "-" + rnd.prefix(4) } ?? "img-" + rnd) + (jpeg ? ".jpg" : ".png"))
+        try data.write(to: dst, options: .atomic)
+        return .success(dst)
+    } catch {
+        return .failure(ImgErr(msg: "לא הצלחתי לשמור את התמונה ליד הסיכום (אין מקום בדיסק, או שאין הרשאה לתיקייה)"))
+    }
+}
+// עותק קטן (JPEG) בשביל Claude: מהיר יותר וזול יותר מהתמונה המלאה
+func visionCopy(_ src: URL, maxSide: Int = 1100, into dir: URL) -> URL? {
+    guard let cg = loadImageScaled(src, maxSide: maxSide), let d = encodeImage(cg, jpeg: true, quality: 0.8) else { return nil }
+    let u = dir.appendingPathComponent(UUID().uuidString + ".jpg")
+    return (try? d.write(to: u)) != nil ? u : nil
+}
+func scratchDir(_ tag: String) -> URL {
+    let u = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("timmy-\(tag)-\(UUID().uuidString.prefix(8))", isDirectory: true)
+    try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+    return u
+}
+
+// MARK: Claude מסתכל על התמונות ומחליט באיזה סעיף ומה הכיתוב
+struct ImgPlan { var section: String; var caption: String }
+func summaryForImages(_ text: String) -> String {
+    text.components(separatedBy: "\n").filter { parseImageLine($0) == nil && !$0.hasPrefix("תמלול מלא:") }.joined(separator: "\n")
+}
+func planImages(md: URL, images: [URL], notes: [String], request: String, token: CancelToken?) -> [ImgPlan]? {
+    let text = (try? String(contentsOf: md, encoding: .utf8)) ?? ""
+    let secs = callSections(text)
+    let tmp = scratchDir("vision"); defer { try? FileManager.default.removeItem(at: tmp) }
+    let small = images.compactMap { visionCopy($0, into: tmp) }
+    guard small.count == images.count, !small.isEmpty else { return nil }
+    let noteLines = notes.enumerated().compactMap { $0.element.isEmpty ? nil : "תמונה \($0.offset + 1): \($0.element)" }
+    let prompt = """
+    אתה עוזר לטימי, אפליקציה שמכינה מסמך PDF ללקוח מסיכום של שיחה עסקית. בעל העסק רוצה לשלב במסמך את \(images.count == 1 ? "התמונה המצורפת" : "\(images.count) התמונות המצורפות") (לפי הסדר: הראשונה היא תמונה 1).
+    \(request.isEmpty ? "" : "מה הוא ביקש: \"\(request)\"\n")\(noteLines.isEmpty ? "" : "מה ידוע על התמונות:\n" + noteLines.joined(separator: "\n") + "\n")
+    כל התמונות המצורפות כאן נכנסות למסמך הזה, גם אם הבקשה מזכירה עוד תמונות או שיחות של לקוחות אחרים (אותן טימי מטפל בנפרד). תחזיר פריט לכל אחת מ-\(images.count) התמונות.
+    לכל תמונה תחליט:
+    1. section: באיזה סעיף של הסיכום היא הכי מתאימה, לפי מה שרואים בה ומה שכתוב בסעיף. העתק את שם הסעיף בדיוק מהרשימה. אם אף סעיף לא מתאים במיוחד: "סוף".
+    2. caption: \(captionRules)
+    הסעיפים בסיכום: \(secs.isEmpty ? "(אין סעיפים)" : secs.map { "\"\($0)\"" }.joined(separator: ", "))
+
+    הסיכום:
+    \(String(summaryForImages(text).prefix(9000)))
+
+    החזר JSON בלבד, בלי שום טקסט נוסף: {"images":[{"n":1,"section":"...","caption":"..."}]}
+    """
+    let (t, _) = runClaudeWithImages(prompt, images: small, labels: small.indices.map { "תמונה \($0 + 1):" }, model: configModel("summary_model", "sonnet"), timeout: 150, token: token)
+    guard let t, let o = lastJSONObject(t, key: "images"), let arr = o["images"] as? [Any] else { return nil }
+    var plans = Array(repeating: ImgPlan(section: "", caption: ""), count: images.count)
+    for (k, x) in arr.enumerated() {
+        guard let d = x as? [String: Any] else { continue }
+        let n = ((d["n"] as? Int) ?? (d["n"] as? String).flatMap { Int($0) } ?? (k + 1)) - 1
+        guard plans.indices.contains(n) else { continue }
+        plans[n] = ImgPlan(section: (d["section"] as? String) ?? "", caption: clientCaption((d["caption"] as? String) ?? ""))
+    }
+    return plans
+}
+// הכיתוב נכנס למסמך שהלקוח מקבל: מתאר מה רואים, כמו כיתוב במצגת. בלי פרשנות על הקשר לשיחה
+let captionRules = """
+כיתוב קצר בעברית, 3 עד 10 מילים, שמתאר ללקוח מה רואים בתמונה, כמו כיתוב מתחת לתמונה במצגת או בספר. למשל: "מסך יצירת קמפיין בפייסבוק", "נתוני החשיפה של 30 הימים האחרונים", "דוגמה למודעה של מתחרה", "טבלת המחירים של החבילות".
+   - רק מה שרואים בתמונה. מותר לקרוא לדבר בשם שלו מהסיכום (שם המוצר, הכלי, הקמפיין), אבל בלי להסביר איך התמונה קשורה לשיחה: בלי "קשור ל", "בהקשר של", "כפי שדיברנו", "בנפרד מ", ובלי השוואה למה שנאמר בשיחה.
+   - אף פעם לא לכתוב שהתמונה לא קשורה, לא רלוונטית או ריקה מתוכן: בעל העסק בחר לשים אותה. תמונה בלי תוכן ברור: תיאור פשוט ("תמונה בצבע אדום").
+   - בלי מספרים, שמות, סכומים או תוצאות שלא כתובים בתמונה עצמה.
+   - רואים בה בעיקר אנשים: "רגע מתוך הפגישה" או מה שמוצג לידם, בלי לתאר איך הם נראים.
+   - בלי מרכאות, בלי נקודה בסוף, בלי מקף ארוך, בלי הזמן בסרטון (טימי מוסיף אותו).
+"""
+// רשת ביטחון: אם Claude בכל זאת הוסיף פרשנות ("..., קשורה לרעיון X", "לא קשור לשיחה"), החלק הזה יורד
+let captionCommentary = ["לא קשור", "לא קשורה", "לא קשורים", "לא קשורות", "שאינו קשור", "שאינה קשורה", "שקשור", "שקשורה", "שקשורים", "שקשורות",
+                         "קשור ל", "קשורה ל", "קשורים ל", "קשורות ל", "בהקשר ל", "בהקשר של", "בנפרד מ", "לא רלוונטי", "ללא תוכן", "בלי תוכן",
+                         "רלוונטי ל", "רלוונטית ל", "שמתייחס", "מתייחס ל", "מתייחסת ל", "כפי שנאמר", "כפי שדובר", "שדובר עליו", "שדובר עליה", "שדיברנו", "כמו שדיברנו",
+                         "מהשיחה", "בשיחה", "לשיחה"]
+func clientCaption(_ s: String) -> String {
+    let c = cleanCaption(s)
+    // מה שלפני הפרשנות הראשונה, בלי סימן פיסוק או מילת חיבור תלויים בסוף ("ו", "אבל", "ללא")
+    guard let first = captionCommentary.compactMap({ c.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) else { return c }
+    var pre = String(c[..<first.lowerBound])
+    var again = true
+    while again {
+        again = false
+        pre = pre.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:-–()"))
+        for w in [" אבל", " אך", " ללא", " בלי", " וגם", " ו", " ש", " לא", " אינו", " אינה"] where pre.hasSuffix(w) { pre = String(pre.dropLast(w.count)); again = true }
+    }
+    return pre.split(separator: " ").count >= 2 ? pre : ""
+}
+
+// MARK: הוספה / מחיקה / הזזה / כיתוב
+struct ImgOutcome {
+    var ok = false, cancelled = false
+    var message = ""
+    var added: [CallImage] = []
+    var choices: [URL] = []          // כמה סרטונים מתאימים: המשתמש בוחר
+    var md: URL? = nil
+}
+func imagesSummaryLine(_ md: URL) -> String {
+    let imgs = callImages(md)
+    guard !imgs.isEmpty else { return "אין עכשיו תמונות ב-PDF של השיחה" }
+    return "התמונות ב-PDF של השיחה עכשיו: " + imgs.enumerated().map { "\($0.offset + 1)) \"\($0.element.caption)\" (בסעיף \($0.element.section.isEmpty ? "בהתחלה" : $0.element.section))" }.joined(separator: "; ")
+}
+// הודעה + שורת מצב: אם בהודעה יש כמה שורות (למשל קובץ שלא נפתח), המצב בשורה משלו, אחרת אחרי רווח. תמיד עם נקודה ביניהם
+func joinStatus(_ msg: String, _ status: String) -> String {
+    var m = msg.trimmingCharacters(in: .whitespacesAndNewlines)
+    if m.isEmpty { return status }
+    if let l = m.last, !".!?:)".contains(l) { m += "." }
+    return m + (m.contains("\n") ? "\n" : " ") + status
+}
+func hebrewCount(_ n: Int, one: String, many: String) -> String { n == 1 ? one : "\(n) \(many)" }
+
+// files: תמונות מהמחשב. target: שם סעיף / start / end (ריק = Claude בוחר). caption: כיתוב שהמשתמש הכתיב (לתמונה אחת או לכולן)
+// notes: מה ידוע על כל תמונה (למשל "צילום מהסרטון X בדקה 3:20"), suffix: תוספת לכיתוב של כל תמונה ("(דקה 3:20)")
+// names: שם לעותק של כל קובץ (תמונות מסרטון: "vid-<מפתח הסרטון>-t<שנייה>", כדי לזהות בפעם הבאה מה כבר נוסף)
+func addImagesToCall(md: URL, files: [URL], target: String? = nil, caption: String? = nil, notes: [String] = [], suffix: [String] = [],
+                     plans given: [ImgPlan]? = nil, names: [String] = [], request: String = "", token: CancelToken, progress: @escaping (String) -> Void) -> ImgOutcome {
+    var res = ImgOutcome(); res.md = md
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: md.path) else { res.message = "לא מצאתי את הסיכום של השיחה. אולי הוא הועבר או נמחק."; return res }
+    let imgs = files.filter(isImageFile)
+    let skipped = files.count - imgs.count
+    guard !imgs.isEmpty else { res.message = "אפשר להוסיף ל-PDF רק תמונות (PNG, JPG, HEIC, WebP או GIF)."; return res }
+    progress(imgs.count == 1 ? "מכין את התמונה…" : "מכין את התמונות…")
+    let dir = callImagesDir(md)
+    var stored: [URL] = [], from: [Int] = [], problems: [String] = []   // from[i] = המקום של העותק ה-i ב-files (בשביל notes / suffix / plans)
+    // תמונה שכבר ב-PDF של השיחה (אותו קובץ בדיוק אחרי ההקטנה) לא נכנסת פעם שנייה
+    var have: [Data] = callImages(md).compactMap { im in
+        guard im.url.deletingLastPathComponent().standardizedFileURL.path == dir.standardizedFileURL.path else { return nil }
+        return try? Data(contentsOf: im.url)
+    }
+    var dupes: [String] = []
+    for (fi, f) in files.enumerated() where isImageFile(f) {
+        if token.isCancelled { break }
+        let nm = names.indices.contains(fi) ? names[fi] : nil
+        switch storeImage(f, in: dir, name: nm) {
+        case .success(let u):
+            if let d = try? Data(contentsOf: u), have.contains(d) {
+                try? fm.removeItem(at: u); dupes.append(f.lastPathComponent); continue
+            } else if let d = try? Data(contentsOf: u) { have.append(d) }
+            stored.append(u); from.append(fi)
+        case .failure(let e): problems.append(e.msg + ".")
+        }
+    }
+    let dupeNote = dupes.isEmpty ? "" : (dupes.count == 1 ? "התמונה \u{2066}\(dupes[0])\u{2069} כבר נמצאת ב-PDF של השיחה הזאת, אז לא הוספתי אותה שוב."
+        : "התמונות " + dupes.map { "\u{2066}" + $0 + "\u{2069}" }.joined(separator: ", ") + " כבר נמצאות ב-PDF של השיחה הזאת, אז לא הוספתי אותן שוב.")
+    func rollback() { for u in stored { try? fm.removeItem(at: u) }; if (try? fm.contentsOfDirectory(atPath: dir.path))?.isEmpty == true { try? fm.removeItem(at: dir) } }
+    if token.isCancelled { rollback(); res.cancelled = true; return res }
+    if stored.isEmpty, !dupes.isEmpty { res.ok = true; res.message = ([dupeNote] + problems).joined(separator: "\n"); return res }   // שום דבר חדש: ה-PDF לא משתנה
+    guard !stored.isEmpty else { res.message = problems.joined(separator: "\n"); return res }
+    func at<T>(_ a: [T], _ i: Int) -> T? { a.indices.contains(from[i]) ? a[from[i]] : nil }
+    // איפה וכיתוב: מה שהמשתמש אמר גובר. את השאר Claude מחליט לפי מה שרואים בתמונה
+    let userCaption = caption.map(cleanCaption).flatMap { $0.isEmpty ? nil : $0 }
+    let userTarget = (target ?? "").trimmingCharacters(in: .whitespaces)
+    var plans = given.map { g in stored.indices.map { at(g, $0) ?? ImgPlan(section: "", caption: "") } } ?? Array(repeating: ImgPlan(section: "", caption: ""), count: stored.count)
+    var planned = given != nil
+    if given == nil && (userCaption == nil || userTarget.isEmpty) {
+        progress(stored.count == 1 ? "Claude מסתכל על התמונה ובוחר לה מקום וכיתוב…" : "Claude מסתכל על התמונות ובוחר להן מקום וכיתוב…")
+        if let p = planImages(md: md, images: stored, notes: stored.indices.map { at(notes, $0) ?? "" }, request: request, token: token) { plans = p; planned = true }
+    }
+    if token.isCancelled { rollback(); res.cancelled = true; return res }
+    if plans.count < stored.count { plans += Array(repeating: ImgPlan(section: "", caption: ""), count: stored.count - plans.count) }
+    // הסיכום נקרא מחדש רגע לפני הכתיבה (אולי השתנה בינתיים)
+    guard var text = try? String(contentsOf: md, encoding: .utf8) else { rollback(); res.message = "לא הצלחתי לקרוא את הסיכום."; return res }
+    let secs = callSections(text)
+    // סעיף שהמשתמש ביקש ולא קיים בסיכום: התמונה נכנסת בסוף, ואומרים לו את זה (ולא "בסעיף X")
+    var missingTarget: String?
+    if !userTarget.isEmpty, !isStartTarget(userTarget), !isEndTarget(userTarget), matchSection(userTarget, in: secs) == nil { missingTarget = userTarget }
+    let rel = { (u: URL) in dir.lastPathComponent + "/" + u.lastPathComponent }
+    var order: [(target: String, line: String)] = []
+    var onlyTime = false
+    for (i, u) in stored.enumerated() {
+        var cap = userCaption ?? plans[i].caption
+        if let sx = at(suffix, i), !sx.isEmpty { if cap.isEmpty { onlyTime = true }; cap = cap.isEmpty ? sx : cap + " " + sx }
+        let tg = userTarget.isEmpty ? plans[i].section : userTarget
+        order.append((tg, imageMDLine(cap, rel(u))))
+    }
+    // לפי הסדר, כל קבוצה לסעיף שלה
+    var groups: [(String, [String])] = []
+    for o in order {
+        let key = isEndTarget(o.target) || o.target.isEmpty ? "end" : (isStartTarget(o.target) ? "start" : (matchSection(o.target, in: secs) ?? "end"))
+        if let gi = groups.firstIndex(where: { $0.0 == key }) { groups[gi].1.append(o.line) } else { groups.append((key, [o.line])) }
+    }
+    for (k, ls) in groups { text = insertingImageLines(text, ls, target: k) }
+    guard writeAtomic(text, md) else { rollback(); res.message = "לא הצלחתי לשמור את הסיכום. שום דבר לא השתנה."; return res }
+    let all = callImages(md)
+    res.added = stored.compactMap { u in all.first { $0.url.lastPathComponent == u.lastPathComponent } }
+    res.ok = true
+    var where_: [String] = []
+    for a in res.added where !where_.contains(a.section) { where_.append(a.section) }
+    let qnames = where_.map { $0.isEmpty ? "בתחילת המסמך" : "\"\($0)\"" }
+    let place = where_.count == 1 ? (where_[0].isEmpty ? " בתחילת המסמך" : " בסעיף " + qnames[0])
+        : where_.count > 1 ? " (בסעיפים " + qnames.dropLast().joined(separator: ", ") + " ו-" + qnames.last! + ")" : ""
+    let many = res.added.count > 1
+    if let m = missingTarget {
+        res.message = (many ? "הוספתי \(res.added.count) תמונות ל-PDF" : "הוספתי את התמונה ל-PDF")
+            + ". לא מצאתי בסיכום סעיף בשם \"\(m)\", אז \(many ? "שמתי אותן" : "שמתי אותה")" + place + "."
+            + (secs.isEmpty ? "" : " הסעיפים בסיכום: " + secs.joined(separator: ", ") + ".")
+    } else {
+        res.message = (many ? "הוספתי \(res.added.count) תמונות ל-PDF" : "הוספתי את התמונה ל-PDF") + place + "."
+    }
+    if !planned && userCaption == nil {
+        res.message += onlyTime ? " לא הצלחתי לבקש מ-Claude כיתוב, אז כתבתי מתחת רק את הדקה בסרטון. אפשר לכתוב לי כיתוב, או לערוך אותו ב\"השיחות שלי\"."
+            : " לא הצלחתי לבקש מ-Claude כיתוב, אז \(many ? "הן" : "היא") בלי כיתוב. אפשר לכתוב לי כיתוב, או לערוך אותו ב\"השיחות שלי\"."
+    }
+    if !dupeNote.isEmpty { res.message += " " + dupeNote }
+    if !problems.isEmpty { res.message += "\n" + problems.joined(separator: "\n") }
+    if skipped > 0 { res.message += "\n" + (skipped == 1 ? "קובץ אחד שהוא לא תמונה דילגתי עליו." : "דילגתי על \(skipped) קבצים שהם לא תמונות.") }
+    return res
+}
+
+enum ImageEdit: Equatable { case remove, up, down, move(String), caption(String) }
+// מחזיר שגיאה בעברית, או nil אם הצליח
+func editCallImage(md: URL, index: Int, _ e: ImageEdit) -> String? {
+    guard let text = try? String(contentsOf: md, encoding: .utf8) else { return "לא מצאתי את הסיכום של השיחה." }
+    let dir = md.deletingLastPathComponent()
+    let imgs = callImages(text: text, dir: dir)
+    guard !imgs.isEmpty else { return "אין תמונות ב-PDF של השיחה הזאת." }
+    guard imgs.indices.contains(index) else { return "יש ב-PDF של השיחה \(imgs.count == 1 ? "רק תמונה אחת" : "\(imgs.count) תמונות"), אז אין תמונה מספר \(index + 1)." }
+    let im = imgs[index]
+    var ls = text.components(separatedBy: "\n")
+    switch e {
+    case .remove:
+        ls.remove(at: im.line)
+        guard writeAtomic(tidyBlankLines(ls.joined(separator: "\n")), md) else { return "לא הצלחתי לשמור את הסיכום." }
+        // העותק של טימי עובר לפח (אפשר להחזיר משם), ורק אם הוא באמת בתיקיית התמונות של השיחה הזאת. קובץ בכל מקום אחר לא נוגעים בו
+        let own = callImagesDir(md).resolvingSymlinksInPath().standardizedFileURL.path
+        if !imgs.contains(where: { $0.line != im.line && $0.url.path == im.url.path }),
+           im.url.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL.path == own {
+            let fm = FileManager.default
+            if (try? fm.trashItem(at: im.url, resultingItemURL: nil)) == nil { try? fm.removeItem(at: im.url) }
+            let d = callImagesDir(md)
+            if (try? fm.contentsOfDirectory(atPath: d.path))?.filter({ !$0.hasPrefix(".") }).isEmpty == true { try? fm.removeItem(at: d) }
+        }
+    case .caption(let c):
+        ls[im.line] = imageMDLine(c, im.rel)
+        guard writeAtomic(ls.joined(separator: "\n"), md) else { return "לא הצלחתי לשמור את הסיכום." }
+    case .up, .down:
+        let j = e == .up ? index - 1 : index + 1
+        guard imgs.indices.contains(j) else { return e == .up ? "זו כבר התמונה הראשונה." : "זו כבר התמונה האחרונה." }
+        ls.swapAt(im.line, imgs[j].line)
+        guard writeAtomic(ls.joined(separator: "\n"), md) else { return "לא הצלחתי לשמור את הסיכום." }
+    case .move(let target):
+        let t = target.trimmingCharacters(in: .whitespaces)
+        if !isStartTarget(t) && !isEndTarget(t) && matchSection(t, in: callSections(text)) == nil {
+            return "לא מצאתי בסיכום סעיף בשם \"\(t)\". הסעיפים: " + callSections(text).joined(separator: ", ") + "."
+        }
+        let line = ls.remove(at: im.line)
+        let moved = insertingImageLines(tidyBlankLines(ls.joined(separator: "\n")), [line], target: t)
+        guard writeAtomic(moved, md) else { return "לא הצלחתי לשמור את הסיכום." }
+    }
+    return nil
+}
+
+// MARK: סרטון: ffmpeg, הורדה מהדרייב, רגעים מועמדים, בחירה עם Claude
+func ffmpegPath() -> String? {
+    var c: [String] = []
+    if let p = loadConfig()["ffmpeg_path"] as? String, !p.isEmpty { c.append((p as NSString).expandingTildeInPath) }
+    c += ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
+    return c.first { FileManager.default.isExecutableFile(atPath: $0) }
+}
+func videoDuration(_ v: URL, ffmpeg: String) -> Double? {
+    let probe = ((ffmpeg as NSString).deletingLastPathComponent as NSString).appendingPathComponent("ffprobe")
+    if FileManager.default.isExecutableFile(atPath: probe) {
+        let r = runProcess(probe, ["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", v.path], timeout: 40)
+        if let d = Double(r.out.trimmingCharacters(in: .whitespacesAndNewlines)), d > 0 { return d }
+    }
+    let r = runProcess(ffmpeg, ["-hide_banner", "-i", v.path], timeout: 40, mergeStderr: true)
+    if let g = rxGroups(r.out, "Duration: (\\d+):(\\d+):(\\d+(?:\\.\\d+)?)"), let h = Double(g[1]), let m = Double(g[2]), let s = Double(g[3]) {
+        let d = h * 3600 + m * 60 + s
+        return d > 0 ? d : nil
+    }
+    return nil
+}
+@discardableResult
+func grabFrame(_ v: URL, at t: Double, width: Int?, to out: URL, ffmpeg: String, token: CancelToken?) -> Bool {
+    // -ss לפני -i: קפיצה ישירה לנקודה (מהיר גם בסרטון של שעתיים)
+    var a = ["-hide_banner", "-loglevel", "error", "-y", "-ss", String(format: "%.2f", max(0, t)), "-i", v.path, "-frames:v", "1", "-an"]
+    if let width { a += ["-vf", "scale=\(width):-2"] }
+    a += ["-q:v", "2", out.path]
+    let r = runProcess(ffmpeg, a, timeout: 45, token: token)
+    return r.launched && !r.timedOut && FileManager.default.fileExists(atPath: out.path) && ((try? out.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 500
+}
+// רגעים שבהם התמונה מתחלפת (שקף חדש, מסך אחר). רק פריימים מרכזיים: מהיר
+func sceneChanges(_ v: URL, ffmpeg: String, timeout: TimeInterval, token: CancelToken?) -> [Double] {
+    let r = runProcess(ffmpeg, ["-hide_banner", "-skip_frame", "nokey", "-i", v.path, "-an", "-sn",
+                                "-vf", "scale=160:-2,select='gt(scene,0.22)',showinfo", "-vsync", "vfr", "-f", "null", "-"],
+                       timeout: timeout, token: token, mergeStderr: true)
+    let re = try! NSRegularExpression(pattern: "pts_time:([0-9.]+)")
+    let ns = r.out as NSString
+    return re.matches(in: r.out, range: NSRange(location: 0, length: ns.length)).compactMap { Double(ns.substring(with: $0.range(at: 1))) }
+}
+func fmtTime(_ t: Double) -> String {
+    let s = Int(t.rounded()), h = s / 3600, m = (s % 3600) / 60, sec = s % 60
+    return h > 0 ? String(format: "%d:%02d:%02d", h, m, sec) : String(format: "%d:%02d", m, sec)
+}
+// "3:20", "03:20", "1:02:03", "6:23.9" (חלקי שנייה), "3" (דקות), "200 שניות"
+func parseTimes(_ s: String) -> [Double] {
+    let secMode = s.contains("שני") || s.lowercased().contains("sec")
+    let re = try! NSRegularExpression(pattern: "\\d+(?::\\d{1,2}){0,2}(?:\\.\\d+)?")
+    let ns = s as NSString
+    return re.matches(in: s, range: NSRange(location: 0, length: ns.length)).compactMap { m -> Double? in
+        let p = ns.substring(with: m.range).components(separatedBy: ":").compactMap { Double($0) }
+        switch p.count {
+        case 1: return secMode ? p[0] : p[0] * 60
+        case 2: return p[0] * 60 + p[1]
+        case 3: return p[0] * 3600 + p[1] * 60 + p[2]
+        default: return nil
+        }
+    }
+}
+func isDataless(_ u: URL) -> Bool {
+    var st = stat()
+    return stat(u.path, &st) == 0 && (st.st_flags & 0x40000000) != 0   // SF_DATALESS: קובץ בדרייב שעוד לא ירד למחשב
+}
+private final class ReadProgress { let lock = NSLock(); var bytes: Int64 = 0; var done = false; var failed = false; var stop = false }
+// קובץ בדרייב שנמצא רק בענן: קוראים אותו פעם אחת עד הסוף, וכך הדרייב מוריד אותו (עם התקדמות, ביטול, ועצירה אם נתקע)
+func downloadIfNeeded(_ u: URL, token: CancelToken, progress: @escaping (String) -> Void) -> String? {
+    guard isDataless(u) else { return nil }
+    let total = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+    let st = ReadProgress()
+    // סרטון גדול: אומרים מראש שזה ייקח זמן (אפשר לבטל בכל רגע)
+    progress(total >= 800_000_000 ? "הסרטון גדול (\u{2066}\(prettySize(total))\u{2069}) ועדיין לא במחשב, אז ההורדה מהדרייב יכולה לקחת כמה דקות. אפשר ללחוץ \"בטל\" בכל רגע." : "מוריד את הסרטון מהדרייב…")
+    Thread.detachNewThread {
+        guard let h = try? FileHandle(forReadingFrom: u) else { st.lock.lock(); st.failed = true; st.done = true; st.lock.unlock(); return }
+        defer { try? h.close() }
+        while true {
+            st.lock.lock(); let stop = st.stop; st.lock.unlock()
+            if stop { return }
+            let d: Data?
+            do { d = try h.read(upToCount: 4 << 20) } catch { st.lock.lock(); st.failed = true; st.done = true; st.lock.unlock(); return }
+            let n = d?.count ?? 0
+            st.lock.lock(); st.bytes += Int64(n); if n == 0 { st.done = true }; st.lock.unlock()
+            if n == 0 { return }
+        }
+    }
+    var last: Int64 = -1, lastChange = Date()
+    let mbTotal = max(1, Int(total / 1_000_000))
+    let started = Date()
+    while true {
+        Thread.sleep(forTimeInterval: 0.4)
+        st.lock.lock(); let b = st.bytes, done = st.done, failed = st.failed; st.lock.unlock()
+        if token.isCancelled { st.lock.lock(); st.stop = true; st.lock.unlock(); return "בוטל" }
+        if done { return failed ? "לא הצלחתי להוריד את הסרטון מהדרייב. בדוק שיש אינטרנט ושהדרייב מחובר, ונסה שוב." : nil }
+        if b != last { last = b; lastChange = Date() }
+        // נתקע: שתי דקות בלי אף בייט חדש
+        if Date().timeIntervalSince(lastChange) > 120 {
+            st.lock.lock(); st.stop = true; st.lock.unlock()
+            return "ההורדה של הסרטון מהדרייב נתקעה. בדוק את החיבור לאינטרנט ושהדרייב פועל, ונסה שוב."
+        }
+        let mb = Int(b / 1_000_000)
+        // זמן משוער: לפי הקצב עד עכשיו (רק אחרי כמה שניות, כשהקצב כבר יציב)
+        var eta = ""
+        let el = Date().timeIntervalSince(started)
+        if total > 0, b > 4_000_000, el > 6 {
+            let left = Double(total - b) / (Double(b) / el)
+            eta = left >= 90 ? " (עוד כ-\(Int((left / 60).rounded())) דקות)" : left >= 20 ? " (עוד פחות מדקה וחצי)" : ""
+        }
+        progress(total > 0 ? "מוריד את הסרטון מהדרייב… \u{2066}\(mb) מתוך \(mbTotal) MB\u{2069}" + eta : "מוריד את הסרטון מהדרייב… \u{2066}\(mb) MB\u{2069}")
+    }
+}
+
+// בדיקה מהירה של פריים: חושך, אחידות, חדות וטביעת אצבע (לזיהוי כפולים)
+struct FrameStats { var mean = 0.0, std = 0.0, sharp = 0.0, hash: UInt64 = 0 }
+func frameStats(_ u: URL) -> FrameStats? {
+    guard let cg = loadImageScaled(u, maxSide: 160) else { return nil }
+    let w = 96, h = max(8, Int(Double(96) * Double(cg.height) / Double(max(1, cg.width))))
+    var px = [UInt8](repeating: 0, count: w * h)
+    let drawn = px.withUnsafeMutableBytes { buf -> Bool in
+        guard let ctx = CGContext(data: buf.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return false }
+        ctx.interpolationQuality = .medium
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return true
+    }
+    guard drawn else { return nil }
+    var s = FrameStats()
+    let n = Double(px.count)
+    s.mean = px.reduce(0.0) { $0 + Double($1) } / n
+    s.std = sqrt(px.reduce(0.0) { $0 + pow(Double($1) - s.mean, 2) } / n)
+    var lap = 0.0, cnt = 0.0
+    for y in 1..<(h - 1) { for x in 1..<(w - 1) {
+        let c = Double(px[y * w + x]) * 4 - Double(px[y * w + x - 1]) - Double(px[y * w + x + 1]) - Double(px[(y - 1) * w + x]) - Double(px[(y + 1) * w + x])
+        lap += c * c; cnt += 1 } }
+    s.sharp = cnt > 0 ? lap / cnt : 0
+    var g = [UInt8](repeating: 0, count: 9 * 8)
+    let hashed = g.withUnsafeMutableBytes { buf -> Bool in
+        guard let c2 = CGContext(data: buf.baseAddress, width: 9, height: 8, bitsPerComponent: 8, bytesPerRow: 9, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return false }
+        c2.interpolationQuality = .medium
+        c2.draw(cg, in: CGRect(x: 0, y: 0, width: 9, height: 8))
+        return true
+    }
+    if hashed {
+        var hsh: UInt64 = 0
+        for y in 0..<8 { for x in 0..<8 { hsh = (hsh << 1) | (g[y * 9 + x] > g[y * 9 + x + 1] ? 1 : 0) } }
+        s.hash = hsh
+    }
+    return s
+}
+
+// MARK: מציאת סרטון בדרייב שמסונכרן למחשב (Google Drive לשולחן העבודה)
+func driveRoots() -> [URL] {
+    if let e = ProcessInfo.processInfo.environment["TIMMY_DRIVE_DIRS"] {
+        return e.components(separatedBy: ":").filter { !$0.isEmpty }.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+    let fm = FileManager.default
+    var out: [URL] = []
+    let cs = home.appendingPathComponent("Library/CloudStorage")
+    for n in (try? fm.contentsOfDirectory(atPath: cs.path))?.sorted() ?? [] where n.hasPrefix("GoogleDrive") { out.append(cs.appendingPathComponent(n)) }
+    for legacy in ["Google Drive", "My Drive"] {
+        let u = home.appendingPathComponent(legacy)
+        if fm.fileExists(atPath: u.path) && !out.contains(u) { out.append(u) }
+    }
+    return out
+}
+// התיקייה שנפתחת בחלון הבחירה: "האחסון שלי" / "My Drive"
+func driveStartFolder() -> URL? {
+    guard let r = driveRoots().first else { return nil }
+    for n in ["My Drive", "האחסון שלי", "Meu Drive", "Mi unidad"] {
+        let u = r.appendingPathComponent(n)
+        if FileManager.default.fileExists(atPath: u.path) { return u }
+    }
+    return r
+}
+let searchStopWords: Set<String> = ["את", "של", "עם", "מה", "הסרטון", "סרטון", "מהסרטון", "בסרטון", "וידאו", "הווידאו", "הוידאו", "ווידאו", "בדרייב", "מהדרייב",
+    "דרייב", "הדרייב", "גוגל", "drive", "google", "video", "תמונות", "תמונה", "צילומי", "צילום", "מסך", "תיקח", "קח", "לקחת", "תוציא", "מתוך", "על", "זה", "זאת",
+    "הזה", "הזאת", "קובץ", "הקובץ", "בשם", "שנקרא", "pdf", "ה-pdf", "לפ", "ל-pdf", "השיחה", "שיחה", "mp4", "mov", "שלי", "יש", "לי", "בבקשה", "דקה", "מדקה", "הקלטה", "ההקלטה"]
+// מילים לחיפוש: גם מספרים בודדים ("פרק 5", "סרטון 3"), מספר שצמוד לאות מופרד ("פרק5"), ובלי אפסים מובילים ("03" = "3")
+func searchWords(_ s: String) -> [String] {
+    let spaced = s.lowercased()
+        .replacingOccurrences(of: "(\\p{L})(\\d)", with: "$1 $2", options: .regularExpression)
+        .replacingOccurrences(of: "(\\d)(\\p{L})", with: "$1 $2", options: .regularExpression)
+    return spaced.components(separatedBy: CharacterSet.alphanumerics.inverted).compactMap { w -> String? in
+        if !w.isEmpty, w.allSatisfy(\.isNumber) { let t = String(w.drop { $0 == "0" }); return t.isEmpty ? "0" : t }
+        return w.count > 1 ? w : nil
+    }
+}
+func searchTokens(_ s: String) -> [String] {
+    searchWords(s).filter { !searchStopWords.contains($0) }
+}
+// מילים קצרות בשם הקובץ שלא אומרות כלום ("03_מבנה_של_מנהל"): בלעדיהן "של שלומי" לא מתאים לכל קובץ עם "של"
+let nameStopWords: Set<String> = ["של", "את", "עם", "על", "זה", "מה", "שלו", "שלה", "שלי", "שלנו", "שלהם", "גם", "או", "the", "of", "and", "to", "in", "for", "on", "with"]
+func isDigits(_ w: String) -> Bool { !w.isEmpty && w.allSatisfy(\.isNumber) }
+// "שלד" של מילה לפי הצליל, כדי ש-"advantage" ימצא "אדבנטג", "michael navon" ימצא "מיכאל נבון" ו-"אדוונטג" ימצא "אדבנטג"
+func soundSkeleton(_ w: String) -> String {
+    var t = w.lowercased()
+    for (a, b) in [("ch", "k"), ("kh", "k"), ("ck", "k"), ("sh", "s"), ("th", "t"), ("ph", "p"), ("tz", "z"), ("ts", "z"), ("וו", "ב")] { t = t.replacingOccurrences(of: a, with: b) }
+    let map: [Character: Character] = [
+        "b": "B", "v": "B", "w": "B", "c": "K", "k": "K", "q": "K", "d": "D", "f": "P", "p": "P", "g": "G", "j": "G", "l": "L", "m": "M", "n": "N",
+        "r": "R", "s": "S", "x": "S", "t": "T", "z": "Z",
+        "ב": "B", "ג": "G", "ד": "D", "ז": "Z", "ח": "K", "ט": "T", "כ": "K", "ך": "K", "ל": "L", "מ": "M", "ם": "M", "נ": "N", "ן": "N",
+        "ס": "S", "פ": "P", "ף": "P", "צ": "Z", "ץ": "Z", "ק": "K", "ר": "R", "ש": "S", "ת": "T"]
+    var out = ""
+    for ch in t { if let m = map[ch], out.last != m { out.append(m) } }
+    return out
+}
+func tokenVariants(_ w: String) -> [String] {
+    var v = [w]
+    if w.count > 3, let f = w.first, "הובלמשכ".contains(f) { v.append(String(w.dropFirst())) }
+    return v
+}
+func editDistanceAtMost1(_ a: String, _ b: String) -> Bool {
+    let x = Array(a), y = Array(b)
+    if abs(x.count - y.count) > 1 { return false }
+    var i = 0, j = 0, edits = 0
+    while i < x.count && j < y.count {
+        if x[i] == y[j] { i += 1; j += 1; continue }
+        edits += 1; if edits > 1 { return false }
+        if x.count > y.count { i += 1 } else if y.count > x.count { j += 1 } else { i += 1; j += 1 }
+    }
+    return edits + (x.count - i) + (y.count - j) <= 1
+}
+func tokenScore(_ q: String, _ names: [String]) -> Double {
+    var best = 0.0
+    for n in names {
+        // מספר מתאים רק למספר זהה ("5" לא מתאים ל-"50" או ל-"פרק5")
+        if isDigits(q) || isDigits(n) { if q == n { best = max(best, 3) }; continue }
+        for a in tokenVariants(q) { for b in tokenVariants(n) {
+            let short = min(a.count, b.count), long = max(a.count, b.count)
+            if a == b { best = max(best, 3) }
+            else if short >= 2 && (short >= 4 || long - short <= 1) && (b.hasPrefix(a) || a.hasPrefix(b)) { best = max(best, 2) }
+            else if short >= 4 && (b.contains(a) || a.contains(b)) { best = max(best, 1.5) }
+            else if a.count >= 4 && b.count >= 4 && editDistanceAtMost1(a, b) { best = max(best, 1) }
+        } }
+        let sq = soundSkeleton(q), sn = soundSkeleton(n)
+        if sq.count >= 3 && sq == sn { best = max(best, 1.5) }
+    }
+    return best
+}
+// זוגות מילים צמודות ("פרק 5", "סרטון 3"): שם שיש בו את אותו צירוף מקבל עדיפות
+func wordPairs(_ w: [String]) -> Set<String> { w.count < 2 ? [] : Set((0..<(w.count - 1)).map { w[$0] + " " + w[$0 + 1] }) }
+struct VideoMatch { let url: URL; let score: Double; let size: Int64; let modified: Date }
+func searchDriveVideos(_ query: String, roots: [URL] = driveRoots(), token: CancelToken? = nil, timeLimit: TimeInterval = 12) -> [VideoMatch] {
+    let q = searchTokens(query)
+    guard !q.isEmpty else { return [] }
+    let raw = searchWords(query)
+    let qStop = Set(raw.filter { searchStopWords.contains($0) && $0.count >= 3 })   // "סרטון", "הקלטה": לא חובה, אבל שם שיש בו אותן מקבל קצת עדיפות
+    let qPairs = wordPairs(raw)
+    let need = max(1, Int((Double(q.count) * 0.5).rounded(.up)))
+    let deadline = Date().addingTimeInterval(timeLimit)
+    var out: [VideoMatch] = [], seen = 0
+    for root in roots {
+        guard let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey],
+                                                      options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { continue }
+        for case let u as URL in en {
+            seen += 1
+            if seen % 200 == 0 && (Date() > deadline || token?.isCancelled == true) { break }
+            if en.level > 9 { en.skipDescendants(); continue }
+            guard isVideoFile(u) else { continue }
+            let nameAll = searchWords(u.deletingPathExtension().lastPathComponent)
+            let nameT = nameAll.filter { !nameStopWords.contains($0) }
+            let folderT = searchWords(u.deletingLastPathComponent().lastPathComponent).filter { !nameStopWords.contains($0) && !isDigits($0) }
+            var score = 0.0, matched = 0
+            for t in q {
+                let s = tokenScore(t, nameT)
+                if s > 0 { score += s; matched += 1 }
+                else { let f = tokenScore(t, folderT); if f > 0 { score += f * 0.5; matched += 1 } }
+            }
+            guard matched >= need else { continue }
+            score += Double(qStop.intersection(nameAll).count)
+            score += min(3, Double(qPairs.intersection(wordPairs(nameAll)).count) * 1.5)
+            let rv = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            out.append(VideoMatch(url: u, score: score + Double(matched) * 0.5, size: Int64(rv?.fileSize ?? 0), modified: rv?.contentModificationDate ?? .distantPast))
+        }
+    }
+    return out.sorted { $0.score != $1.score ? $0.score > $1.score : $0.modified > $1.modified }
+}
+func prettySize(_ b: Int64) -> String {
+    b >= 1_000_000_000 ? String(format: "%.1f GB", Double(b) / 1e9) : "\(max(1, Int(b / 1_000_000))) MB"
+}
+// תיאור קצר של סרטון לרשימת בחירה: השם, התיקייה, הגודל
+func videoChoiceLine(_ u: URL, _ i: Int) -> String {
+    let size = Int64((try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+    return "\(i + 1). \u{2068}\(u.lastPathComponent)\u{2069} (בתיקייה \u{2068}\(u.deletingLastPathComponent().lastPathComponent)\u{2069}, \u{2066}\(prettySize(size))\u{2069})"
+}
+
+// מפתח קבוע לסרטון (שם + גודל, FNV-1a): נכנס לשם של כל תמונה שנלקחה ממנו, כדי לא להוסיף אותו רגע פעמיים
+func videoKey(_ v: URL) -> String {
+    let size = (try? v.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    var h: UInt32 = 2166136261
+    for b in (v.lastPathComponent + "|" + String(size)).utf8 { h = (h ^ UInt32(b)) &* 16777619 }
+    return String(format: "%08x", h)
+}
+func priorVideoFrames(md: URL, key: String) -> [(url: URL, t: Double)] {
+    callImages(md).compactMap { im in
+        let n = im.url.deletingPathExtension().lastPathComponent
+        guard let g = rxGroups(n, "^vid-\(key)-t(\\d+)"), let t = Double(g[1]) else { return nil }
+        return (im.url, t)
+    }
+}
+// מסרטון ל-PDF: רגעים מדויקים שהמשתמש ביקש, או בחירה אוטומטית (מועמדים -> סינון -> Claude בוחר 2 עד 6)
+func videoFramesToCall(md: URL, video: URL, at times: [Double], count: Int = 0, target: String? = nil, request: String = "",
+                       token: CancelToken, progress: @escaping (String) -> Void) -> ImgOutcome {
+    var res = ImgOutcome(); res.md = md
+    guard let ff = ffmpegPath() else { res.message = "כדי לקחת תמונות מסרטון צריך את ffmpeg, והוא לא נמצא במחשב. אפשר להתקין אותו מחדש עם ההתקנה של טימי."; return res }
+    guard FileManager.default.fileExists(atPath: video.path) else { res.message = "לא מצאתי את הסרטון \u{2068}\(video.lastPathComponent)\u{2069}. אולי הוא הועבר או נמחק."; return res }
+    if let e = downloadIfNeeded(video, token: token, progress: progress) {
+        if token.isCancelled { res.cancelled = true } else { res.message = e }
+        return res
+    }
+    progress("בודק את הסרטון…")
+    guard let dur = videoDuration(video, ffmpeg: ff) else { res.message = "לא הצלחתי לפתוח את \u{2068}\(video.lastPathComponent)\u{2069} כסרטון. אולי הקובץ פגום, או בפורמט שלא נתמך."; return res }
+    if token.isCancelled { res.cancelled = true; return res }
+    let tmp = scratchDir("frames"); defer { try? FileManager.default.removeItem(at: tmp) }
+    let vname = video.deletingPathExtension().lastPathComponent
+    let vkey = videoKey(video)
+    let prior = priorVideoFrames(md: md, key: vkey)   // תמונות מהסרטון הזה שכבר ב-PDF של השיחה
+    // רגעים מדויקים
+    if !times.isEmpty {
+        let bad = times.filter { $0 > dur + 0.5 }
+        let dup = times.filter { t in t <= dur + 0.5 && prior.contains { abs($0.t - min(t, max(0, dur - 0.3))) < 2 } }
+        let good = times.filter { t in !bad.contains(t) && !dup.contains(t) }
+        var extra: [String] = []
+        if !bad.isEmpty { extra.append("הסרטון ארוך \(fmtTime(dur)) בלבד, אז אין בו את " + bad.map(fmtTime).joined(separator: ", ") + ".") }
+        if !dup.isEmpty { extra.append("כבר יש ב-PDF של השיחה תמונה מהסרטון הזה מדקה " + dup.map(fmtTime).joined(separator: ", ") + ", אז לא הוספתי אותה שוב.") }
+        guard !good.isEmpty else {
+            res.message = extra.joined(separator: " ") + (bad.isEmpty ? "" : " תגיד לי רגע אחר.")
+            return res
+        }
+        var files: [URL] = [], notes: [String] = [], suffix: [String] = [], names: [String] = []
+        for (i, t0) in good.enumerated() {
+            if token.isCancelled { res.cancelled = true; return res }
+            let t = min(t0, max(0, dur - 0.3))
+            progress(good.count == 1 ? "לוקח את התמונה מדקה \(fmtTime(t))…" : "לוקח תמונה מדקה \(fmtTime(t)) (\(i + 1) מתוך \(good.count))…")
+            let out = tmp.appendingPathComponent("at-\(i).jpg")
+            if grabFrame(video, at: t, width: nil, to: out, ffmpeg: ff, token: token) {
+                files.append(out); notes.append("צילום מהסרטון \"\(vname)\" בדקה \(fmtTime(t))"); suffix.append("(דקה \(fmtTime(t)))")
+                names.append("vid-\(vkey)-t\(Int(t.rounded()))")
+            }
+        }
+        if token.isCancelled { res.cancelled = true; return res }
+        guard !files.isEmpty else { res.message = "לא הצלחתי לקחת תמונה מהסרטון ברגע הזה. נסה רגע אחר."; return res }
+        var r = addImagesToCall(md: md, files: files, target: target, notes: notes, suffix: suffix, names: names, request: request, token: token, progress: progress)
+        if r.ok, !extra.isEmpty { r.message += " " + extra.joined(separator: " ") }
+        return r
+    }
+    // בחירה אוטומטית: עד 24 מועמדים בחלוקה שווה, ובסרטון של עד חצי שעה גם רגעים שבהם המסך מתחלף
+    let n = dur < 60 ? 10 : 24
+    var cand = (0..<n).map { (Double($0) + 0.5) * dur / Double(n) }
+    if dur <= 1800 {
+        progress("מחפש בסרטון את הרגעים שבהם המסך מתחלף…")
+        let sc = sceneChanges(video, ffmpeg: ff, timeout: 40, token: token).map { min(dur - 0.3, $0 + 0.8) }.filter { $0 > 1 }
+        if token.isCancelled { res.cancelled = true; return res }
+        if sc.count >= 3 {
+            // רגעי ההחלפה קודם (בלי שניים צמודים, ועד שני שלישים מהמועמדים, בפיזור על כל הסרטון), ואז השלמה מהחלוקה השווה
+            let gap = max(4, dur / 60)
+            var spaced: [Double] = []
+            for t in sc.sorted() where !spaced.contains(where: { abs($0 - t) < gap }) { spaced.append(t) }
+            let cap = n * 2 / 3
+            var pick = spaced.count <= cap ? spaced : (0..<cap).map { spaced[$0 * spaced.count / cap] }
+            for t in cand where pick.count < n && !pick.contains(where: { abs($0 - t) < gap }) { pick.append(t) }
+            cand = pick.sorted()
+        }
+    }
+    var frames: [(url: URL, t: Double)] = []
+    let lock = NSLock(), q = DispatchQueue(label: "timmy.frames", attributes: .concurrent), g = DispatchGroup(), sem = DispatchSemaphore(value: 4)
+    var doneCount = 0
+    progress("לוקח \(cand.count) תמונות מועמדות מהסרטון…")
+    for (i, t) in cand.enumerated() {
+        g.enter()
+        q.async {
+            sem.wait(); defer { sem.signal(); g.leave() }
+            if token.isCancelled { return }
+            let out = tmp.appendingPathComponent(String(format: "cand-%02d.jpg", i))
+            let ok = grabFrame(video, at: t, width: 512, to: out, ffmpeg: ff, token: token)
+            // ההתקדמות נשלחת בתוך הנעילה: המספר אף פעם לא יורד ("18 מתוך 24" ואחריו "17")
+            lock.lock(); if ok { frames.append((out, t)) }; doneCount += 1
+            progress("לוקח תמונות מועמדות מהסרטון… \(doneCount) מתוך \(cand.count)"); lock.unlock()
+        }
+    }
+    g.wait()
+    if token.isCancelled { res.cancelled = true; return res }
+    frames.sort { $0.t < $1.t }
+    // סינון: שחור / אחיד, מטושטש, כמעט כפול
+    let stats = frames.map { frameStats($0.url) }
+    let sharpSorted = stats.compactMap { $0?.sharp }.sorted()
+    let median = sharpSorted.isEmpty ? 0 : sharpSorted[sharpSorted.count / 2]
+    var kept: [(url: URL, t: Double)] = [], hashes: [UInt64] = []
+    for (i, f) in frames.enumerated() {
+        guard let s = stats[i] else { continue }
+        if s.mean < 18 || s.std < 7 || (s.mean > 245 && s.std < 12) { continue }
+        if median > 0 && s.sharp < median * 0.2 { continue }
+        if hashes.contains(where: { ($0 ^ s.hash).nonzeroBitCount <= 5 }) { continue }
+        kept.append(f); hashes.append(s.hash)
+    }
+    if kept.count < 2 { kept = frames.enumerated().filter { stats[$0.offset].map { $0.mean >= 18 && $0.std >= 7 } ?? false }.map { $0.element } }
+    guard !kept.isEmpty else { res.message = "לא מצאתי בסרטון רגעים ברורים (הוא נראה חשוך או ריק). אפשר לבקש ממני רגע מסוים, למשל \"דקה 3:20\"."; return res }
+    // שוב אותו סרטון לאותה שיחה ("תוסיף עוד תמונות מהסרטון"): בלי רגעים, או תמונות כמעט זהות, שכבר ב-PDF
+    if !prior.isEmpty {
+        let ph = prior.compactMap { frameStats($0.url)?.hash }
+        let gap = max(3, dur / 100)
+        kept = kept.filter { f in
+            if prior.contains(where: { abs($0.t - f.t) < gap }) { return false }
+            guard let h = frameStats(f.url)?.hash else { return true }
+            return !ph.contains { ($0 ^ h).nonzeroBitCount <= 5 }
+        }
+        guard !kept.isEmpty else {
+            res.message = "כבר הוספתי ל-PDF של השיחה את הרגעים מהסרטון הזה (דקה " + prior.map { fmtTime($0.t) }.joined(separator: ", ") + "), ולא מצאתי בו עוד רגעים אחרים. אפשר לבקש רגע מסוים, למשל \"דקה 3:20\"."
+            return res
+        }
+    }
+    let want = count > 0 ? min(count, kept.count) : 0
+    progress("Claude בוחר את התמונות שהכי מתאימות לשיחה…")
+    let text = (try? String(contentsOf: md, encoding: .utf8)) ?? ""
+    let secs = callSections(text)
+    let prompt = """
+    אתה עוזר לטימי, אפליקציה שמכינה מסמך PDF ללקוח מסיכום של שיחה עסקית. בעל העסק רוצה להוסיף למסמך תמונות מתוך הסרטון "\(vname)".
+    מצורפות \(kept.count) תמונות מהסרטון, לפי הסדר. לפני כל תמונה כתוב המספר שלה והדקה שלה ("תמונה 3 (דקה 4:10):"): n הוא המספר שכתוב ממש לפני התמונה שבחרת, אל תספור בעצמך.
+    \(request.isEmpty ? "" : "מה הוא ביקש: \"\(request)\"\n")
+    בחר \(want > 0 ? "בדיוק \(want)" : "בין 2 ל-6") תמונות שהכי מוסיפות ללקוח מידע שקשור לשיחה: מסך או שקף עם תוכן, טבלה, מוצר, תוצאה, משהו שהסיכום מדבר עליו. דלג על תמונות מטושטשות, כמעט זהות לאחרת שבחרת, חשוכות, מסכי מעבר, או סתם פנים של אנשים בלי מידע. פחות תמונות טובות עדיף על הרבה בינוניות.
+    \(want > 0 ? "" : "אם אין בסרטון אף רגע כזה (הסרטון לא קשור לנושא של השיחה, או שרואים בו רק פנים, רקע או גרפיקה כללית), אל תבחר כלום והחזר {\"frames\":[]}: עדיף מסמך בלי תמונות מאשר תמונות שלא אומרות ללקוח כלום.")
+    לכל תמונה שבחרת:
+    - section: באיזה סעיף של הסיכום היא הכי מתאימה (העתק את השם בדיוק מהרשימה), או "סוף".
+    - caption: \(captionRules)
+    הסעיפים בסיכום: \(secs.isEmpty ? "(אין סעיפים)" : secs.map { "\"\($0)\"" }.joined(separator: ", "))
+
+    הסיכום:
+    \(String(summaryForImages(text).prefix(8000)))
+
+    החזר JSON בלבד, לפי סדר הזמן בסרטון: {"frames":[{"n":3,"section":"...","caption":"..."}]}
+    """
+    var chosen: [(t: Double, plan: ImgPlan)] = []
+    let labels = kept.enumerated().map { "תמונה \($0.offset + 1) (דקה \(fmtTime($0.element.t))):" }
+    let (out, _) = runClaudeWithImages(prompt, images: kept.map(\.url), labels: labels, model: configModel("summary_model", "sonnet"), timeout: 180, token: token)
+    if token.isCancelled { res.cancelled = true; return res }
+    let answer = out.flatMap { lastJSONObject($0, key: "frames") }.flatMap { $0["frames"] as? [Any] }
+    // Claude ענה, ובכוונה לא בחר כלום: אין בסרטון משהו שקשור לשיחה. לא מוסיפים תמונות סתם
+    if let answer, answer.isEmpty {
+        res.message = "הסתכלתי על הסרטון \u{2068}\(vname)\u{2069} ולא מצאתי בו רגע שמוסיף משהו לסיכום של השיחה, אז לא הוספתי תמונות. אפשר לבקש רגע מסוים, למשל \"תיקח צילום מדקה 3:20\"."
+        return res
+    }
+    if let arr = answer {
+        for x in arr {
+            guard let d = x as? [String: Any], let n = (d["n"] as? Int) ?? (d["n"] as? String).flatMap({ Int($0) }), kept.indices.contains(n - 1) else { continue }
+            if chosen.contains(where: { $0.t == kept[n - 1].t }) { continue }
+            chosen.append((kept[n - 1].t, ImgPlan(section: (d["section"] as? String) ?? "", caption: clientCaption((d["caption"] as? String) ?? ""))))
+        }
+    }
+    var note = ""
+    if chosen.isEmpty {   // Claude לא ענה (או לא היה אפשר להבין את התשובה): כמה רגעים בחלוקה שווה, רק עם הדקה
+        let k = want > 0 ? want : min(4, kept.count)
+        chosen = (0..<k).map { i in (kept[min(kept.count - 1, i * kept.count / k)].t, ImgPlan(section: "סוף", caption: "")) }
+        note = " לא הצלחתי לקבל מ-Claude בחירה עכשיו, אז לקחתי רגעים בחלוקה שווה, ושמתי אותם בסוף המסמך רק עם הדקה. אפשר למחוק או להזיז כל אחת."
+    }
+    if want > 0 { chosen = Array(chosen.prefix(want)) }
+    chosen.sort { $0.t < $1.t }
+    var files: [URL] = [], plans: [ImgPlan] = [], suffix: [String] = [], names: [String] = []
+    for (i, c) in chosen.enumerated() {
+        if token.isCancelled { res.cancelled = true; return res }
+        progress("שומר את התמונות באיכות מלאה… \(i + 1) מתוך \(chosen.count)")
+        let f = tmp.appendingPathComponent("full-\(i).jpg")
+        if grabFrame(video, at: c.t, width: nil, to: f, ffmpeg: ff, token: token) {
+            files.append(f); plans.append(c.plan); suffix.append("(דקה \(fmtTime(c.t)))"); names.append("vid-\(vkey)-t\(Int(c.t.rounded()))")
+        }
+    }
+    if token.isCancelled { res.cancelled = true; return res }
+    guard !files.isEmpty else { res.message = "לא הצלחתי לשמור את התמונות מהסרטון. נסה שוב."; return res }
+    var r = addImagesToCall(md: md, files: files, target: target, suffix: suffix, plans: plans, names: names, request: request, token: token, progress: progress)
+    if r.ok, !r.added.isEmpty {
+        r.message = (r.added.count == 1 ? "לקחתי מהסרטון תמונה אחת שהכי מתאימה לשיחה והוספתי אותה ל-PDF." : "בחרתי מהסרטון \(r.added.count) תמונות שהכי מתאימות לשיחה והוספתי אותן ל-PDF.") + note
+    }
+    return r
+}
+
+// עמוד ב-PDF כתמונה (לתצוגה מקדימה בצ'אט): העמוד שיש בו את הכיתוב, אחרת הראשון
+func pdfPagePNG(_ pdf: URL, containing text: String?, to png: URL, width: CGFloat = 900) -> Bool {
+    guard let doc = PDFDocument(url: pdf), doc.pageCount > 0 else { return false }
+    var page = doc.page(at: 0)!
+    if let t = text?.trimmingCharacters(in: .whitespaces), t.count > 3 {
+        let probe = String(t.prefix(24))
+        if let sel = doc.findString(probe, withOptions: [.caseInsensitive]).first, let p = sel.pages.first { page = p }
+    }
+    let b = page.bounds(for: .mediaBox)
+    let img = page.thumbnail(of: NSSize(width: width, height: width * b.height / b.width), for: .mediaBox)
+    guard let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let d = rep.representation(using: .png, properties: [:]) else { return false }
+    return (try? d.write(to: png)) != nil
 }
 
 // MARK: - וואטסאפ דרך Greenolink (מחבר MCP של Claude). טימי לא מדבר עם וואטסאפ בעצמו: הוא מבקש מ-Claude Code
@@ -6037,9 +7308,133 @@ final class CallsModel: ObservableObject {
     var selected: CallItem? { calls.first { $0.id == selectedID } }
     func blocks(_ c: CallItem) -> [MDBlock] {
         if let (d, b) = textCache[c.id], d == c.modified { return b }
-        let b = parseMarkdown(summaryBody((try? String(contentsOf: c.url, encoding: .utf8)) ?? ""))
+        let dir = c.url.deletingLastPathComponent()
+        let b = parseMarkdown(summaryBody((try? String(contentsOf: c.url, encoding: .utf8)) ?? "")).map { blk -> MDBlock in
+            guard case .image(let cap, let p) = blk else { return blk }
+            let e = (p as NSString).expandingTildeInPath
+            return .image(cap, e.hasPrefix("/") ? e : dir.appendingPathComponent(p).path)
+        }
         textCache[c.id] = (c.modified, b)
         return b
+    }
+    func sections(_ c: CallItem) -> [String] { callSections((try? String(contentsOf: c.url, encoding: .utf8)) ?? "") }
+
+    // MARK: תמונות ב-PDF: הוספה (בחירה / גרירה), תמונות מסרטון, עריכה. ברקע, עם התקדמות ו"בטל"
+    @Published var imgBusy: [String: String] = [:]
+    @Published var imgNote: [String: String] = [:]
+    @Published var imgNoteError: [String: Bool] = [:]
+    private var imgTokens: [String: CancelToken] = [:]
+    private var pdfAgain: [String: Bool] = [:]   // שינוי בזמן שה-PDF בהכנה: בונים שוב בסוף (ערך = לפתוח אחרי)
+    func note(_ c: CallItem, _ t: String, error: Bool) { imgNote[c.id] = t; imgNoteError[c.id] = error }
+    func pickImages(_ c: CallItem) {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.png, .jpeg, .heic, .heif, .webP, .gif, .tiff, .bmp, .image]
+        p.allowsMultipleSelection = true; p.canChooseDirectories = false
+        p.message = "בחר תמונות או צילומי מסך להוסיף ל-PDF של השיחה (אפשר כמה)"
+        p.prompt = "הוסף ל-PDF"
+        NSApp.activate(ignoringOtherApps: true)
+        if p.runModal() == .OK, !p.urls.isEmpty { addImages(c, p.urls) }
+    }
+    func handleDrop(_ c: CallItem, _ urls: [URL]) {
+        let imgs = urls.filter(isImageFile), vids = urls.filter(isVideoFile)
+        if !imgs.isEmpty { addImages(c, imgs) }
+        else if let v = vids.first { videoFrames(c, v, at: []) }
+        else if !urls.isEmpty { note(c, "אפשר לגרור לכאן תמונות (PNG, JPG, HEIC, WebP) או סרטון.", error: true) }
+    }
+    func addImages(_ c: CallItem, _ urls: [URL]) {
+        runImageJob(c, start: urls.count == 1 ? "מכין את התמונה…" : "מכין את התמונות…") { token, prog in
+            addImagesToCall(md: c.url, files: urls, token: token, progress: prog)
+        }
+    }
+    func pickVideo(_ c: CallItem) {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.movie, .video, .mpeg4Movie, .quickTimeMovie, .avi] + ["mkv", "webm", "m4v"].compactMap { UTType(filenameExtension: $0) }
+        p.allowsMultipleSelection = false; p.canChooseDirectories = false
+        let drive = driveStartFolder()
+        if let drive { p.directoryURL = drive }
+        p.message = drive != nil ? "בחר סרטון מהדרייב (או מכל מקום במחשב). טימי ייקח ממנו תמונות שמתאימות לשיחה" : "בחר סרטון. טימי ייקח ממנו תמונות שמתאימות לשיחה"
+        p.prompt = "קח תמונות"
+        // רגעים מסוימים (לא חובה): בלי זה טימי בוחר לבד
+        let acc = NSStackView()
+        acc.orientation = .horizontal; acc.spacing = 8; acc.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 14)
+        acc.userInterfaceLayoutDirection = .rightToLeft
+        let label = NSTextField(labelWithString: "רגעים מסוימים (לא חובה):")
+        label.alignment = .right
+        let field = NSTextField(string: "")
+        field.placeholderString = "למשל 3:20, 12:05 · ריק = טימי יבחר לבד"
+        field.alignment = .right; field.baseWritingDirection = .rightToLeft
+        field.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        acc.addArrangedSubview(label); acc.addArrangedSubview(field)
+        acc.frame = NSRect(x: 0, y: 0, width: 520, height: 44)
+        p.accessoryView = acc
+        p.isAccessoryViewDisclosed = true
+        NSApp.activate(ignoringOtherApps: true)
+        if p.runModal() == .OK, let u = p.url { videoFrames(c, u, at: parseTimes(field.stringValue)) }
+    }
+    func videoFrames(_ c: CallItem, _ v: URL, at: [Double]) {
+        runImageJob(c, start: "פותח את הסרטון…") { token, prog in videoFramesToCall(md: c.url, video: v, at: at, token: token, progress: prog) }
+    }
+    func cancelImages(_ c: CallItem) { imgTokens[c.id]?.cancel(); if imgBusy[c.id] != nil { imgBusy[c.id] = "מבטל…" } }
+    func editImage(_ c: CallItem, _ index: Int, _ e: ImageEdit) {
+        guard imgBusy[c.id] == nil else { return }
+        if restylingPaths.contains(c.url.path) { note(c, "טימי משכתב עכשיו את הסיכום הזה. נסה שוב בעוד רגע.", error: true); return }
+        if imageBusyPaths.contains(c.url.path) { note(c, "טימי משנה עכשיו תמונות בשיחה הזאת מהצ'אט. נסה שוב בעוד רגע.", error: true); return }
+        if let err = editCallImage(md: c.url, index: index, e) { note(c, err, error: true); return }
+        imgNote[c.id] = nil
+        textCache[c.id] = nil; reload()
+        rebuildPDF(calls.first { $0.id == c.id } ?? c, open: false)
+    }
+    private func runImageJob(_ c: CallItem, start: String, _ work: @escaping (CancelToken, @escaping (String) -> Void) -> ImgOutcome) {
+        guard imgBusy[c.id] == nil else { return }
+        if restylingPaths.contains(c.url.path) { note(c, "טימי משכתב עכשיו את הסיכום הזה. נסה שוב בעוד רגע.", error: true); return }
+        if imageBusyPaths.contains(c.url.path) { note(c, "טימי משנה עכשיו תמונות בשיחה הזאת מהצ'אט. נסה שוב בעוד רגע.", error: true); return }
+        if renaming == c.id { cancelRename() }
+        let token = CancelToken(), id = c.id, path = c.url.path
+        imgTokens[id] = token; imgBusy[id] = start; imgNote[id] = nil
+        imageBusyPaths.insert(path)
+        let t0 = Date()
+        DispatchQueue.global().async {
+            let r = work(token) { t in DispatchQueue.main.async { if !token.isCancelled, self.imgBusy[id] != nil { self.imgBusy[id] = t } } }
+            DispatchQueue.main.async {
+                self.imgBusy[id] = nil; self.imgTokens[id] = nil
+                imageBusyPaths.remove(path)
+                if r.cancelled || token.isCancelled {
+                    self.note(c, "ביטלתי. שום דבר לא השתנה ב-PDF.", error: false)
+                    demoFinished(["flow": "calls-images", "ok": false, "cancelled": true]); return
+                }
+                guard r.ok else { self.note(c, r.message, error: true); demoFinished(["flow": "calls-images", "ok": false, "error": r.message]); return }
+                if r.added.isEmpty { self.note(c, r.message, error: false); demoFinished(["flow": "calls-images", "ok": true, "message": r.message]); return }   // הכול כבר היה ב-PDF
+                self.note(c, joinStatus(r.message, "מכין את ה-PDF מחדש…"), error: false)
+                self.textCache[id] = nil; self.reload()
+                self.rebuildPDF(self.calls.first { $0.id == id } ?? c, open: true, after: r.message) { ok in
+                    demoFinished(["flow": "calls-images", "ok": ok, "message": r.message, "pdf": c.pdfURL.path, "seconds": Int(Date().timeIntervalSince(t0)),
+                                  "images": callImages(c.url).map { ["caption": $0.caption, "section": $0.section, "path": $0.url.path] }])
+                }
+            }
+        }
+    }
+    private var pdfTokens: [String: CancelToken] = [:]
+    // "בטל" בזמן שה-PDF בהכנה (גם אחרי הוספת תמונות): השינויים בסיכום נשמרים, רק ה-PDF לא נבנה עכשיו
+    func cancelPDF(_ c: CallItem) { pdfAgain[c.id] = nil; pdfTokens[c.id]?.cancel() }
+    func rebuildPDF(_ c: CallItem, open: Bool, after msg: String? = nil, done: ((Bool) -> Void)? = nil) {
+        if pdf[c.id] == .working { pdfAgain[c.id] = (pdfAgain[c.id] ?? false) || open; done?(true); return }
+        pdf[c.id] = .working; pdfNote[c.id] = nil
+        let token = CancelToken(); pdfTokens[c.id] = token
+        buildPDF(md: c.url, dest: c.pdfURL, token: token) { [weak self] ok, claude, note in
+            guard let self else { return }
+            self.pdfTokens[c.id] = nil
+            if token.isCancelled {
+                self.pdf[c.id] = nil; self.pdfAgain[c.id] = nil
+                self.note(c, (msg.map { $0 + "\n" } ?? "") + "ביטלתי את הכנת ה-PDF. מה שהוספת נשמר בסיכום, ואפשר ללחוץ \"הורד PDF\" מתי שרוצים.", error: false)
+                done?(false); return
+            }
+            if let note, note.hasPrefix("לא הצלחתי להפעיל את הסקיל") || note.hasPrefix("לא מצאתי") { self.pdfNote[c.id] = note }
+            self.pdf[c.id] = ok ? .done(c.pdfURL, claude) : .failed("לא הצלחתי ליצור PDF")
+            if let msg { self.note(c, ok ? joinStatus(msg, "ה-PDF מוכן.") : msg, error: !ok) }
+            if let again = self.pdfAgain.removeValue(forKey: c.id) { self.rebuildPDF(c, open: again || open, done: done); return }
+            if ok && open { openExternal(c.pdfURL) }
+            done?(ok)
+        }
     }
 
     // מודלים
@@ -6062,6 +7457,7 @@ final class CallsModel: ObservableObject {
         if t.isEmpty { return "צריך לכתוב כותרת" }
         if pdf[c.id] == .working { return "ה-PDF של השיחה עוד בהכנה. אפשר לשנות כותרת בעוד רגע" }
         if restylingPaths.contains(c.url.path) { return "טימי משכתב עכשיו את הסיכום הזה. אפשר לשנות כותרת בעוד רגע" }
+        if imgBusy[c.id] != nil || imageBusyPaths.contains(c.url.path) { return "טימי מוסיף עכשיו תמונות ל-PDF של השיחה. אפשר לשנות כותרת בעוד רגע" }
         let fm = FileManager.default
         let dir = c.url.deletingLastPathComponent()
         let oldBase = c.url.deletingPathExtension().lastPathComponent
@@ -6079,7 +7475,7 @@ final class CallsModel: ObservableObject {
             return nil
         }
         // מה זז: הקבצים שקיימים, לפי הסדר (הסיכום ראשון)
-        var plan: [(URL, URL)] = [".md", " - תמלול.txt", ".mp3", ".pdf"].compactMap { sfx in
+        var plan: [(URL, URL)] = [".md", " - תמלול.txt", ".mp3", ".pdf", imagesFolderSuffix].compactMap { sfx in
             let a = dir.appendingPathComponent(oldBase + sfx)
             return fm.fileExists(atPath: a.path) ? (a, dir.appendingPathComponent(newBase + sfx)) : nil
         }
@@ -6105,7 +7501,7 @@ final class CallsModel: ObservableObject {
         }
         // הכותרת ושורת התמלול בתוך הסיכום (ובהעתק)
         do {
-            if let oldText { try retitledMarkdown(oldText, title: raw, newBase: newBase).write(to: plan[0].1, atomically: true, encoding: .utf8) }
+            if let oldText { try retitledMarkdown(oldText, title: raw, newBase: newBase, oldBase: oldBase).write(to: plan[0].1, atomically: true, encoding: .utf8) }
             if let copy, let oldCopy { try retitledMarkdown(oldCopy, title: raw, newBase: newBase).write(to: copy.1, atomically: true, encoding: .utf8) }
         } catch {
             if let oldText { try? oldText.write(to: plan[0].1, atomically: true, encoding: .utf8) }
@@ -6132,9 +7528,12 @@ final class CallsModel: ObservableObject {
         if pdf[c.id] == .working { return }
         pdf[c.id] = .working
         pdfNote[c.id] = nil
-        buildPDF(md: c.url, dest: c.pdfURL) { [weak self] ok, claude, note in
+        let token = CancelToken(); pdfTokens[c.id] = token
+        buildPDF(md: c.url, dest: c.pdfURL, token: token) { [weak self] ok, claude, note in
             guard let self else { return }
-            if let note, note.hasPrefix("לא הצלחתי להפעיל את הסקיל") { self.pdfNote[c.id] = note }
+            self.pdfTokens[c.id] = nil
+            if token.isCancelled { self.pdf[c.id] = nil; return }
+            if let note, note.hasPrefix("לא הצלחתי להפעיל את הסקיל") || note.hasPrefix("לא מצאתי") { self.pdfNote[c.id] = note }
             if ok { self.pdf[c.id] = .done(c.pdfURL, claude); revealInFinder(c.pdfURL) }
             else { self.pdf[c.id] = .failed("לא הצלחתי ליצור PDF") }
         }
@@ -6398,19 +7797,37 @@ struct CallRow: View {
 // MARK: הסיכום
 struct CallDetailPane: View {
     @ObservedObject var m: CallsModel
+    @State private var dropping = false
     var body: some View {
         if let c = m.selected {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     CallDetailHeader(m: m, c: c)
                     Rectangle().fill(ink.opacity(0.08)).frame(height: 1)
-                    MarkdownView(blocks: m.blocks(c))
+                    CallSummaryView(m: m, c: c)
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 .padding(.trailing, 14).padding(.bottom, 24)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .id(c.id)
+            // גרירה של תמונות (או סרטון) לשיחה: נכנסות ל-PDF שלה
+            .overlay {
+                if dropping {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous).fill(amber.opacity(0.07))
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(amber, style: StrokeStyle(lineWidth: 2, dash: [7, 5])))
+                        .overlay(VStack(spacing: 8) {
+                            Image(systemName: "photo.badge.plus").font(.system(size: 30, weight: .semibold))
+                            Text(he("שחרר כאן כדי להוסיף ל-PDF של השיחה")).font(.system(size: 15, weight: .bold))
+                            Text(he("תמונות וצילומי מסך, או סרטון שטימי ייקח ממנו תמונות")).font(.system(size: 12)).opacity(0.75)
+                        }.foregroundColor(amber))
+                        .allowsHitTesting(false)
+                }
+            }
+            .onDrop(of: [.fileURL], isTargeted: $dropping) { providers in
+                loadDroppedURLs(providers) { m.handleDrop(c, $0) }
+                return true
+            }
         } else {
             Text(he("בחר שיחה מהרשימה")).font(.system(size: 14)).foregroundColor(ink.opacity(0.4))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -6446,7 +7863,8 @@ struct CallDetailHeader: View {
                 if !c.person.isEmpty { MetaChip(icon: "person", text: "עם: " + c.person, accent: true) }
             }
             CallActions(m: m, c: c).padding(.top, 4)
-            PDFStatusLine(state: m.pdf[c.id])
+            PDFStatusLine(state: m.pdf[c.id], onCancel: { m.cancelPDF(c) })
+            ImageJobLine(m: m, c: c)
             if let n = m.pdfNote[c.id], m.pdf[c.id] != .working {
                 Text(he(n)).font(.system(size: 12)).foregroundColor(ink.opacity(0.6)).fixedSize(horizontal: false, vertical: true)
             }
@@ -6496,6 +7914,9 @@ struct CallActions: View {
     @ObservedObject var m: CallsModel
     let c: CallItem
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) { row1; row2 }
+    }
+    var row1: some View {
         HStack(spacing: 8) {
             ActionButton(title: "שלח בוואטסאפ", icon: "paperplane.fill", primary: true) { m.openSend(c) }
             ActionButton(title: m.pdf[c.id] == .working ? "מכין PDF…" : "הורד PDF", icon: "arrow.down.doc") { m.makePDF(c) }
@@ -6504,6 +7925,126 @@ struct CallActions: View {
                 .disabled(!c.hasTranscript).opacity(c.hasTranscript ? 1 : 0.4)
             ActionButton(title: "פתח בתיקייה", icon: "folder") { m.reveal(c) }
         }
+    }
+    var row2: some View {
+        HStack(spacing: 8) {
+            ActionButton(title: "הוסף תמונות ל-PDF", icon: "photo.badge.plus") { m.pickImages(c) }
+                .help(he("צילומי מסך או תמונות. טימי בוחר לכל אחת מקום וכיתוב, ואפשר לשנות"))
+            ActionButton(title: "תמונות מסרטון…", icon: "film") { m.pickVideo(c) }
+                .help(he("בוחרים סרטון (גם מהדרייב), וטימי לוקח ממנו את הרגעים שהכי מתאימים לשיחה"))
+            Text(he("או לגרור תמונות לכאן")).font(.system(size: 12)).foregroundColor(ink.opacity(0.45))
+        }
+        .disabled(m.imgBusy[c.id] != nil).opacity(m.imgBusy[c.id] != nil ? 0.5 : 1)
+    }
+}
+// התקדמות של הוספת תמונות (עם "בטל"), ואחרי זה שורה על מה שקרה
+struct ImageJobLine: View {
+    @ObservedObject var m: CallsModel
+    let c: CallItem
+    var body: some View {
+        if let t = m.imgBusy[c.id] {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(he(t)).font(.system(size: 12.5)).foregroundColor(ink.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
+                Button(action: { m.cancelImages(c) }) {
+                    Text(he("בטל")).font(.system(size: 12, weight: .semibold)).foregroundColor(ink.opacity(0.75))
+                        .padding(.vertical, 3).padding(.horizontal, 10).background(Capsule().fill(ink.opacity(0.1)))
+                }.buttonStyle(.plain).help(he("לעצור באמצע. שום דבר לא יישמר"))
+            }
+        } else if let n = m.imgNote[c.id] {
+            HStack(alignment: .top, spacing: 8) {
+                Text(he(n)).font(.system(size: 12.5)).foregroundColor(m.imgNoteError[c.id] == true ? errInk : ink.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: { m.imgNote[c.id] = nil }) {
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundColor(ink.opacity(0.45))
+                }.buttonStyle(.plain).help("להסתיר")
+            }
+        }
+    }
+}
+// הסיכום בחלון, עם התמונות שב-PDF במקום שלהן ועם כפתורים לכל תמונה
+struct CallSummaryView: View {
+    @ObservedObject var m: CallsModel
+    let c: CallItem
+    var body: some View {
+        let blocks = m.blocks(c)
+        let count = blocks.filter { if case .image = $0 { return true }; return false }.count
+        var n = -1
+        let numbered: [(Int, MDBlock, Int)] = blocks.enumerated().map { i, b in
+            if case .image = b { n += 1; return (i, b, n) }
+            return (i, b, -1)
+        }
+        let secs = count > 0 ? m.sections(c) : []
+        return VStack(alignment: .leading, spacing: 11) {
+            ForEach(numbered, id: \.0) { _, b, k in
+                if case .image(let cap, let path) = b { CallImageCard(m: m, c: c, index: k, count: count, caption: cap, path: path, sections: secs) }
+                else { MDBlockView(block: b) }
+            }
+        }
+    }
+}
+struct CallImageCard: View {
+    @ObservedObject var m: CallsModel
+    let c: CallItem, index: Int, count: Int, caption: String, path: String, sections: [String]
+    @State private var editing = false
+    @State private var text = ""
+    @State private var confirmRemove = false
+    var busy: Bool { m.imgBusy[c.id] != nil || m.pdf[c.id] == .working }
+    var body: some View {
+        VStack(spacing: 8) {
+            MDImage(caption: editing ? "" : caption, path: path)
+            if editing {
+                HStack(spacing: 8) {
+                    RTLField(placeholder: "כיתוב לתמונה", text: $text, size: 13, onSubmit: save, onCancel: { editing = false }, autoFocus: true)
+                        .frame(height: 20).padding(.vertical, 6).padding(.horizontal, 10)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(ink.opacity(0.08)))
+                    PillButton(title: "שמור", primary: true) { save() }
+                    PillButton(title: "ביטול") { editing = false }
+                }
+                .frame(maxWidth: 520)
+            }
+            HStack(spacing: 6) {
+                Text(he("תמונה \(index + 1) מתוך \(count) ב-PDF")).font(.system(size: 11)).foregroundColor(ink.opacity(0.45))
+                Spacer(minLength: 6)
+                ImgIconButton(icon: "arrow.up", help: "להקדים (להחליף מקום עם התמונה הקודמת)") { m.editImage(c, index, .up) }
+                    .disabled(index == 0).opacity(index == 0 ? 0.35 : 1)
+                ImgIconButton(icon: "arrow.down", help: "לאחר (להחליף מקום עם התמונה הבאה)") { m.editImage(c, index, .down) }
+                    .disabled(index >= count - 1).opacity(index >= count - 1 ? 0.35 : 1)
+                Menu {
+                    ForEach(sections, id: \.self) { s in Button(he("לסעיף: " + s)) { m.editImage(c, index, .move(s)) } }
+                    Divider()
+                    Button(he("לתחילת המסמך")) { m.editImage(c, index, .move("start")) }
+                    Button(he("לסוף המסמך")) { m.editImage(c, index, .move("end")) }
+                } label: {
+                    Image(systemName: "rectangle.portrait.and.arrow.right").font(.system(size: 11, weight: .semibold)).foregroundColor(ink.opacity(0.7))
+                }
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .frame(width: 24, height: 24).background(Circle().fill(ink.opacity(0.07))).help(he("להעביר לסעיף אחר"))
+                ImgIconButton(icon: "pencil", help: "לשנות את הכיתוב") { text = caption; editing = true }
+                ImgIconButton(icon: "trash", help: "להוציא את התמונה מה-PDF") { confirmRemove = true }
+            }
+            .frame(maxWidth: 520)
+            .alert(he("להוציא את התמונה מה-PDF?"), isPresented: $confirmRemove) {
+                Button(he("הוצא"), role: .destructive) { m.editImage(c, index, .remove) }
+                Button(he("ביטול"), role: .cancel) {}
+            } message: {
+                Text(he("העותק שטימי שמר עובר לפח של המחשב, ואפשר להחזיר אותו משם."))
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(ink.opacity(0.035)))
+        .disabled(busy)
+    }
+    func save() { editing = false; if text != caption { m.editImage(c, index, .caption(text)) } }
+}
+struct ImgIconButton: View {
+    let icon: String, help: String, action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundColor(ink.opacity(0.7))
+                .frame(width: 24, height: 24).background(Circle().fill(ink.opacity(0.07)))
+        }.buttonStyle(.plain).help(he(help))
     }
 }
 struct ActionButton: View {
@@ -6525,6 +8066,7 @@ struct ActionButton: View {
 }
 struct PDFStatusLine: View {
     let state: CallsModel.PDFState?
+    var onCancel: (() -> Void)? = nil
     @State private var via: String?   // הסקיל שמייצר את ה-PDF (נקרא מהדיסק ברקע, לא בכל ציור)
     var body: some View {
         switch state {
@@ -6533,6 +8075,12 @@ struct PDFStatusLine: View {
                 ProgressView().controlSize(.small)
                 Text(he(via.map { "מכין PDF… (לפי הסקיל \($0), עד שלוש דקות)" } ?? "מכין PDF… (Claude מעצב את המסמך, עד שלוש דקות)"))
                     .font(.system(size: 12.5)).foregroundColor(ink.opacity(0.65))
+                if let onCancel {
+                    Button(action: onCancel) {
+                        Text(he("בטל")).font(.system(size: 12, weight: .semibold)).foregroundColor(ink.opacity(0.75))
+                            .padding(.vertical, 3).padding(.horizontal, 10).background(Capsule().fill(ink.opacity(0.1)))
+                    }.buttonStyle(.plain).help(he("לעצור את הכנת ה-PDF. מה שבסיכום נשמר"))
+                }
             }
             .onAppear {
                 DispatchQueue.global().async {
@@ -7593,6 +9141,62 @@ func runPDFCLI() {
         print("{\"ok\": \(ok), \"claude\": \(claude), \"pdf\": \"\(dest.path)\", \"seconds\": \(Int(Date().timeIntervalSince(t0))), \"note\": \"\(note ?? "")\"}")
         if ok { revealInFinder(dest) }
         exit(ok ? 0 : 1)
+    }
+}
+
+// ערכים אחרי דגל, עד הדגל הבא
+func argList(_ flag: String) -> [String] {
+    guard let i = args.firstIndex(of: flag) else { return [] }
+    return Array(args[(i + 1)...].prefix { !$0.hasPrefix("--") })
+}
+func argString(_ flag: String) -> String? { argList(flag).first }
+func runImagesCLI() {
+    let t0 = Date()
+    func finish(_ o: [String: Any]) {
+        var o = o; o["seconds"] = Int(Date().timeIntervalSince(t0))
+        if let d = try? JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted]), let s = String(data: d, encoding: .utf8) { print(s); fflush(stdout) }
+        exit(o["ok"] as? Bool == true ? 0 : 1)
+    }
+    if let q = argString("--demo-find-video") {
+        DispatchQueue.global().async {
+            let roots = driveRoots(), m = searchDriveVideos(q, roots: roots)
+            DispatchQueue.main.async { finish(["ok": true, "roots": roots.map(\.path), "tokens": searchTokens(q), "matches": m.prefix(8).map { ["path": $0.url.path, "score": $0.score] }]) }
+        }
+        return
+    }
+    let token = CancelToken()
+    if let s = argString("--demo-cancel-after").flatMap(Double.init) { DispatchQueue.global().asyncAfter(deadline: .now() + s) { token.cancel() } }
+    let prog: (String) -> Void = { FileHandle.standardError.write(("… " + $0 + "\n").data(using: .utf8)!) }
+    let flag = ["--demo-add-images", "--demo-video-frames", "--demo-image-edit"].first(where: args.contains)!
+    let vals = argList(flag)
+    guard let first = vals.first else { finish(["ok": false, "error": "missing md"]); return }
+    let md = URL(fileURLWithPath: first)
+    DispatchQueue.global().async {
+        var r = ImgOutcome()
+        switch flag {
+        case "--demo-add-images":
+            r = addImagesToCall(md: md, files: vals.dropFirst().map { URL(fileURLWithPath: $0) }, target: argString("--demo-where"), caption: argString("--demo-caption"),
+                                token: token, progress: prog)
+        case "--demo-video-frames":
+            r = videoFramesToCall(md: md, video: URL(fileURLWithPath: vals.count > 1 ? vals[1] : ""), at: parseTimes(argString("--demo-at") ?? ""),
+                                  count: Int(argString("--demo-count") ?? "") ?? 0, target: argString("--demo-where"), token: token, progress: prog)
+        default:
+            let n = (vals.count > 1 ? Int(vals[1]) : nil) ?? 1, op = vals.count > 2 ? vals[2] : "", v = vals.count > 3 ? vals[3] : ""
+            let e: ImageEdit = op == "remove" ? .remove : op == "up" ? .up : op == "down" ? .down : op == "move" ? .move(v) : .caption(v)
+            if let err = editCallImage(md: md, index: n - 1, e) { r.message = err } else { r.ok = true; r.message = "edited" }
+        }
+        DispatchQueue.main.async {
+            var o: [String: Any] = ["ok": r.ok, "cancelled": r.cancelled, "message": r.message,
+                                    "added": r.added.map { ["caption": $0.caption, "section": $0.section, "path": $0.url.path] },
+                                    "images": callImages(md).map { ["caption": $0.caption, "section": $0.section, "path": $0.url.path] }]
+            guard r.ok, !args.contains("--demo-no-pdf") else { finish(o); return }
+            let pdf = md.deletingPathExtension().appendingPathExtension("pdf")
+            let tp = Date()
+            buildPDF(md: md, dest: pdf) { ok, claude, note in
+                o["ok"] = ok; o["pdf"] = pdf.path; o["claude"] = claude; o["note"] = note ?? ""; o["pdf_seconds"] = Int(Date().timeIntervalSince(tp))
+                finish(o)
+            }
+        }
     }
 }
 

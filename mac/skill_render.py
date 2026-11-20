@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# TIMMY-SKILL-RENDER v4
+# TIMMY-SKILL-RENDER v6
 # Renders a PDF from Markdown with this skill's design (assets/template.html), via headless Google Chrome.
 # Made by Timmy (טימי). Python 3.8+, standard library only. Works from Claude Code and from Timmy.
 #
@@ -9,7 +9,8 @@
 #                             [--html-only] [--chrome /path/to/chrome]
 #
 # Markdown: ## / ### headings, paragraphs, **bold**, *italic*, ==highlight==, - lists, 1. lists, "- [ ] task (owner)" tasks,
-# GitHub tables, > quotes, --- rules, and ":::lead ... :::" for an opening card.
+# GitHub tables, > quotes, --- rules, ":::lead ... :::" for an opening card, and ![caption](image path) on its own line for an image
+# (embedded, up to half a page, caption under it; a relative path is relative to the Markdown file).
 # The template must contain {{TITLE}} and {{CONTENT}}; optional {{FOOTER}}, {{BRAND_HEADER}} (logo + business name), {{LOGO_SRC}},
 # {{BRAND_NAME}}, {{BRAND_TAGLINE}}. Without {{BRAND_HEADER}} the logo/name row goes above the title. Unknown {{...}} placeholders are left empty.
 # Scripts never run in the page (Content-Security-Policy), and nothing loads from the network except Google Fonts.
@@ -44,6 +45,75 @@ def task_html(t, done=False):
     o = f'<span class="owner">{inline(owner.strip())}</span>' if owner.strip() else ""
     cls = ' class="task done"' if done else ' class="task"'
     return f"<li><span{cls}>{inline(t.strip())}</span>{o}</li>"
+
+
+IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+IMG_CSS = ("<style>figure.timmy-fig{margin:10px 0 16px;padding:0;text-align:center;break-inside:avoid;page-break-inside:avoid}"
+           "figure.timmy-fig img{display:block;margin:0 auto;max-width:100%;max-height:95mm;width:auto;height:auto;object-fit:contain;"
+           "border-radius:10px;border:1px solid rgba(0,0,0,.09)}"
+           "figure.timmy-fig.tall img{max-height:85mm}"
+           ".timmy-row{display:flex;direction:rtl;flex-direction:row;justify-content:center;align-items:flex-start;gap:8mm;margin:10px 0 16px;break-inside:avoid;page-break-inside:avoid}"
+           ".timmy-row figure.timmy-fig{margin:0;flex:0 1 auto;max-width:48%}"
+           "figure.timmy-fig figcaption{margin:7px auto 0;max-width:92%;font-size:.85em;line-height:1.5;opacity:.75;text-align:center}</style>")
+BASE_DIR = [Path.cwd()]
+
+
+def image_kind(data):
+    """The real image type from the first bytes (not the file name), or None."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"): return "image/png"
+    if data.startswith(b"\xff\xd8\xff"): return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"): return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP": return "image/webp"
+    return None
+
+
+def image_size(d):
+    """(width, height) of a PNG / JPEG from its header, or None."""
+    try:
+        if d.startswith(b"\x89PNG"): return int.from_bytes(d[16:20], "big"), int.from_bytes(d[20:24], "big")
+        if d.startswith(b"\xff\xd8"):
+            i = 2
+            while i + 9 < len(d):
+                if d[i] != 0xFF: i += 1; continue
+                m = d[i + 1]
+                if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    return int.from_bytes(d[i + 7:i + 9], "big"), int.from_bytes(d[i + 5:i + 7], "big")
+                if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7: i += 2; continue
+                i += 2 + int.from_bytes(d[i + 2:i + 4], "big")
+    except Exception:
+        pass
+    return None
+
+
+def figure_html(src, caption):
+    src = src.strip()
+    if src.startswith("<") and src.endswith(">"): src = src[1:-1].strip()
+    path = Path(os.path.expanduser(src))
+    if not path.is_absolute(): path = BASE_DIR[0] / path
+    try:
+        path = path.resolve()   # a link is checked by what it points to
+        if path.suffix.lower() not in IMG_MIME or not path.is_file() or path.stat().st_size > 15_000_000: return ""
+        raw = path.read_bytes()
+    except Exception:
+        return ""
+    mime = image_kind(raw[:16])   # only a real image is embedded, whatever the file is called
+    if not mime: return ""
+    sz = image_size(raw[:256 * 1024])
+    tall = bool(sz and sz[0] > 0 and sz[1] > sz[0] * 1.25)
+    data = base64.b64encode(raw).decode()
+    cap = f"<figcaption>{inline(caption)}</figcaption>" if caption.strip() else ""
+    return f'<figure class="timmy-fig{" tall" if tall else ""}"><img src="data:{mime};base64,{data}" alt="">{cap}</figure>'
+
+
+def pair_tall(out):
+    """Two tall (phone) screenshots in a row sit side by side instead of a page each."""
+    res, i = [], 0
+    while i < len(out):
+        a = out[i]
+        if a.startswith('<figure class="timmy-fig tall"') and i + 1 < len(out) and out[i + 1].startswith('<figure class="timmy-fig tall"'):
+            res.append('<div class="timmy-row">' + a + out[i + 1] + "</div>"); i += 2; continue
+        res.append(a); i += 1
+    return res
 
 
 def split_row(r):
@@ -103,13 +173,15 @@ def md_to_html(md):
         m = re.match(r"^\d+[.)]\s+(.*)$", t)
         if m: open_list("ol"); out.append(f"<li>{inline(m.group(1))}</li>"); continue
         if re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", t): close(); out.append("<hr>"); continue
+        m = re.match(r"^!\[([^\]]*)\]\((.+)\)$", t)
+        if m: close(); out.append(figure_html(m.group(2), m.group(1))); continue
         m = re.match(r"^>\s?(.*)$", t)
         if m: close(); out.append(f"<blockquote>{inline(m.group(1))}</blockquote>"); continue
         if lst: close()
         para.append(t)
     close()
     if in_section: out.append("</section>")
-    return "\n".join(out)
+    return "\n".join(pair_tall([x for x in out if x]))
 
 
 CSP = ('<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'none\'; object-src \'none\'; '
@@ -228,7 +300,7 @@ def build_html(md, title, kicker, meta, footer, logo_path="", brand="", tagline=
     for k, v in {"BRAND_HEADER": bh, "LOGO_SRC": logo, "BRAND_NAME": html.escape(brand.strip()), "BRAND_TAGLINE": html.escape(tagline.strip())}.items():
         out = out.replace("{{" + k + "}}", v)
     out = re.sub(r"\{\{(?!CONTENT\}\})[A-Z_]+\}\}", "", out)
-    extra = CSP + (BRAND_CSS if bh else "")
+    extra = CSP + (BRAND_CSS if bh else "") + (IMG_CSS if "timmy-fig" in content else "")
     out = re.sub(r"<head\b[^>]*>", lambda m: m.group(0) + extra, out, count=1, flags=re.I) if re.search(r"<head\b", out, re.I) else extra + out
     if logo:   # a real logo keeps its own shape and proportions, even if the template styled ".logo" as a small circle or square
         out = re.sub(r"</head>", lambda m: LOGO_CSS + m.group(0), out, count=1, flags=re.I) if re.search(r"</head>", out, re.I) else out + LOGO_CSS
@@ -250,6 +322,7 @@ def main():
     p.add_argument("--html-only", action="store_true"); p.add_argument("--chrome", default="")
     a = p.parse_args()
     md = Path(a.input).read_text(encoding="utf-8")
+    BASE_DIR[0] = Path(a.input).resolve().parent
     page = build_html(md, a.title, a.kicker, a.meta, a.footer, os.path.expanduser(a.logo), a.brand, a.tagline)
     out = Path(a.output).resolve()
     html_path = out.with_suffix(".html")

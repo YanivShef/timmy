@@ -17,7 +17,7 @@
 #
 # התוכן: Claude (summary_model) כותב את גוף המסמך מתוך הסיכום (+ התמלול להקשר) ולפי notes.
 # אם Claude לא זמין / נכשל / חרג מ-120 שניות: המרה מקומית של ה-Markdown, כך שתמיד יוצא PDF.
-import sys, os, re, json, html, base64, subprocess, shutil, glob, time, hashlib, tempfile, signal
+import sys, os, re, json, html, base64, subprocess, shutil, glob, time, hashlib, tempfile, signal, atexit, urllib.parse
 from html.parser import HTMLParser
 
 APP_DIR = os.environ.get("TIMMY_APP_DIR") or os.path.expanduser("~/Library/Application Support/Timmy")
@@ -154,8 +154,273 @@ def read_call(md_path):
     person = re.sub(r"\[\[(?:[^\]|]*\|)?([^\]#|]+)(?:#[^\]]*)?\]\]", r"\1", field("עם"))
     length = field("אורך").replace("דק׳", "").strip()
     body = [l for l in lines if not l.startswith("# ") and "**תאריך:**" not in l and not l.startswith("תמלול מלא:")]
-    return {"md": md, "body": "\n".join(body).strip(), "transcript": transcript, "title": title,
-            "date": hebrew_date(field("תאריך")), "length": length, "person": person}
+    md_abs = os.path.abspath(md_path)
+    body, images, claude_body, heads = split_images(body, os.path.dirname(md_abs), os.path.splitext(md_abs)[0] + " - תמונות")
+    return {"md": md, "body": body, "transcript": transcript, "title": title,
+            "date": hebrew_date(field("תאריך")), "length": length, "person": person,
+            "images": images, "body_claude": claude_body, "heads": heads}
+
+
+# ---------- תמונות בסיכום: שורה משלה ![כיתוב](נתיב יחסי לתיקיית הסיכום) ----------
+# טימי מוסיף אותן (צילומי מסך, תמונות מסרטון) לתיקייה "<שם השיחה> - תמונות" שליד הסיכום.
+# Claude לא רואה את התמונות: הוא מקבל את הסיכום בלי שורות התמונה, עם "עוגן" בסוף כל סעיף (⟦מקום S1⟧), ומעתיק את העוגנים
+# ל-HTML / ל-Markdown שלו. אחרי זה כל תמונה נכנסת לעוגן של הסעיף שלה. כך התוכן של Claude לא תלוי בתמונות,
+# ונשמר במטמון: הוספה, מחיקה, הזזה או שינוי כיתוב בונים PDF מחדש בכמה שניות, בלי לחכות שוב ל-Claude.
+IMG_LINE = re.compile(r"^\s*!\[([^\]\n]*)\]\((.+)\)\s*$")
+IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
+ANCHOR_TXT = "⟦מקום {}⟧"
+ANCHOR_ANY = re.compile(r"⟦\s*מקום\s+(S\d+|END)\s*⟧")
+# גובה מקסימלי קטן מחצי עמוד: תמונה שלא נכנסת בסוף עמוד משאירה פחות רווח ריק. צילום מסך של טלפון (גבוה וצר) קטן יותר,
+# ושני צילומי טלפון ברצף עומדים זה לצד זה (.timmy-row) במקום עמוד לכל אחד
+IMG_CSS = ("<style>figure.timmy-fig{margin:10px 0 16px;padding:0;text-align:center;break-inside:avoid;page-break-inside:avoid}"
+           "figure.timmy-fig img{display:block;margin:0 auto;max-width:100%;max-height:95mm;width:auto;height:auto;object-fit:contain;"
+           "border-radius:10px;border:1px solid rgba(0,0,0,.09);box-shadow:0 1px 3px rgba(0,0,0,.06)}"
+           "figure.timmy-fig.tall img{max-height:85mm}"
+           ".timmy-row{display:flex;direction:rtl;flex-direction:row;justify-content:center;align-items:flex-start;gap:8mm;margin:10px 0 16px;break-inside:avoid;page-break-inside:avoid}"
+           ".timmy-row figure.timmy-fig{margin:0;flex:0 1 auto;max-width:48%}"
+           "figure.timmy-fig figcaption{margin:7px auto 0;max-width:92%;font-size:9.5pt;line-height:1.5;color:#6e6e73;direction:rtl;text-align:center}</style>")
+_FIGS = []   # n -> נתיב התמונה (ב-HTML יש קודם מציין מקום קטן, והתמונה עצמה נכנסת רק בסוף, כדי שהביטויים הרגולריים לא ירוצו על מגהבייטים)
+
+
+def parse_img_line(line):
+    m = IMG_LINE.match(line or "")
+    if not m: return None
+    p = m.group(2).strip()
+    if p.startswith("<") and p.endswith(">"): p = p[1:-1].strip()
+    if "%" in p: p = urllib.parse.unquote(p)
+    return m.group(1).strip(), p
+
+
+def is_image_bytes(path):
+    """הקובץ באמת תמונה (לפי הבייטים הראשונים, לא רק לפי הסיומת)."""
+    try:
+        with open(path, "rb") as f: h = f.read(16)
+    except Exception:
+        return False
+    return h.startswith(b"\x89PNG\r\n\x1a\n") or h.startswith(b"\xff\xd8\xff") or h[:6] in (b"GIF87a", b"GIF89a") or (h[:4] == b"RIFF" and h[8:12] == b"WEBP")
+
+
+def image_size(path):
+    """(רוחב, גובה) מהכותרת של PNG / JPEG, בלי ספריות. None אם לא ידוע."""
+    try:
+        with open(path, "rb") as f: d = f.read(256 * 1024)
+        if d.startswith(b"\x89PNG"): return int.from_bytes(d[16:20], "big"), int.from_bytes(d[20:24], "big")
+        if d.startswith(b"\xff\xd8"):
+            i = 2
+            while i + 9 < len(d):
+                if d[i] != 0xFF: i += 1; continue
+                m = d[i + 1]
+                if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    return int.from_bytes(d[i + 7:i + 9], "big"), int.from_bytes(d[i + 5:i + 7], "big")
+                if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7: i += 2; continue
+                i += 2 + int.from_bytes(d[i + 2:i + 4], "big")
+    except Exception:
+        pass
+    return None
+
+
+def is_tall(path):
+    sz = image_size(path)
+    return bool(sz and sz[0] > 0 and sz[1] > sz[0] * 1.25)
+
+
+_MISSING = [0]   # שורות תמונה בסיכום שהקובץ שלהן לא נמצא (או לא בתיקיית התמונות של השיחה): טימי אומר את זה למשתמש
+def split_images(lines, base_dir, img_dir=None):
+    """מחזיר (גוף עם נתיבי תמונה מלאים, [תמונות], גוף ל-Claude עם עוגנים, {עוגן: כותרת הסעיף}).
+    רק תמונות שבאמת נמצאות בתיקייה "<שם השיחה> - תמונות" (גם אחרי קיצורי דרך), ושהן באמת תמונה: שורה בסיכום לא יכולה להכניס למסמך קובץ אחר מהמחשב."""
+    images, out, sec, heads = [], [], 0, {"S0": ""}
+    allowed = os.path.realpath(img_dir) if img_dir else None
+    _MISSING[0] = 0
+    for l in lines:
+        if re.match(r"^##\s+\S", l) and not l.startswith("###"):
+            sec += 1; heads["S%d" % sec] = l.lstrip("#").strip()
+        im = parse_img_line(l)
+        if im:
+            cap, p = im
+            full = os.path.normpath(os.path.join(base_dir, os.path.expanduser(p)))
+            real = os.path.realpath(full)
+            ok = (os.path.splitext(real)[1].lower() in IMG_MIME and os.path.isfile(real)
+                  and (allowed is None or os.path.dirname(real) == allowed) and is_image_bytes(real))
+            if ok:
+                images.append({"cap": cap, "path": real, "anchor": "S%d" % sec})
+                out.append("![%s](%s)" % (cap, real))
+            else:
+                _MISSING[0] += 1
+            continue   # שורת תמונה שהקובץ שלה חסר: לא מופיעה במסמך (וטימי אומר את זה)
+        out.append(l)
+    body = "\n".join(out).strip()
+    if not images: return body, [], body, heads
+    # ל-Claude: בלי שורות התמונה, עוגן לפני הסעיף הראשון (S0), בסוף כל סעיף (S1, S2...) ובסוף המסמך
+    cl, k = [], 0
+    for l in out:
+        if parse_img_line(l): continue
+        if re.match(r"^##\s+\S", l) and not l.startswith("###"):
+            cl += ["", ANCHOR_TXT.format("S%d" % k), ""]; k += 1
+        cl.append(l)
+    cl += ["", ANCHOR_TXT.format("S%d" % k)]
+    # בלי תלות במקום שבו היו התמונות (שורות ריקות): אותו טקסט ל-Claude = אותו מפתח במטמון
+    claude_body = re.sub(r"\n{3,}", "\n\n", "\n".join(x.rstrip() for x in cl)).strip()
+    return body, images, claude_body, heads
+
+
+def fig_html(cap, path):
+    _FIGS.append(path)
+    c = f"<figcaption>{inline(cap)}</figcaption>" if cap.strip() else ""
+    cls = "timmy-fig tall" if is_tall(path) else "timmy-fig"
+    return f'<figure class="{cls}" data-n="{len(_FIGS) - 1}"><img src="timmy-img:{len(_FIGS) - 1}" alt="">{c}</figure>'
+
+
+def pair_tall_figures(page):
+    """שני צילומי טלפון (תמונות גבוהות) ברצף: זה לצד זה בשורה אחת."""
+    fig = r'<figure class="timmy-fig tall" data-n="\d+">(?:(?!</figure>).)*</figure>'
+    return re.sub(r"(" + fig + r")\s*(" + fig + r")", r'<div class="timmy-row">\1\2</div>', page, flags=re.S)
+
+
+def embed_images(page):
+    """מציין המקום של כל תמונה -> data: URI, ו-CSS של התמונות. תמונה שהקובץ שלה נעלם יוצאת מהמסמך."""
+    if "timmy-img:" not in page: return page
+    def data_uri(n):
+        try:
+            p = _FIGS[n]
+            if not is_image_bytes(p): return None
+            with open(p, "rb") as f: return IMG_MIME.get(os.path.splitext(p)[1].lower(), "image/png"), base64.b64encode(f.read()).decode()
+        except Exception:
+            return None
+    cache = {}
+    def fig(m):
+        n = int(m.group(1))
+        if n not in cache: cache[n] = data_uri(n)
+        return m.group(0) if cache[n] else ""
+    page = re.sub(r'<figure class="timmy-fig(?: tall)?" data-n="(\d+)">.*?</figure>', fig, page, flags=re.S)
+    page = pair_tall_figures(page)
+    page = re.sub(r"timmy-img:(\d+)", lambda m: "data:%s;base64,%s" % cache[int(m.group(1))] if cache.get(int(m.group(1))) else "", page)
+    if re.search(r"</head>", page, re.I): page = re.sub(r"</head>", lambda m: IMG_CSS + m.group(0), page, count=1, flags=re.I)
+    else: page = IMG_CSS + page
+    return page
+
+
+def _words(s):
+    s = re.sub(r"<[^>]+>", " ", s or "")
+    return {w for w in re.split(r"[^\w]+", s.lower()) if len(w) > 1}
+
+
+def _same_heading(a, b):
+    wa, wb = _words(a), _words(b)
+    if not wa or not wb: return False
+    return len(wa & wb) / min(len(wa), len(wb)) >= 0.6
+
+
+def place_figures_html(frag, call):
+    """HTML מ-Claude עם עוגנים -> התמונות במקומן. עוגן שנעלם: לפי כותרת הסעיף, ואם גם היא לא נמצאה, בסוף."""
+    imgs = call.get("images") or []
+    by = {}
+    for im in imgs: by.setdefault(im["anchor"], []).append(im)
+    used = set()
+    def figs(a): return "".join(fig_html(im["cap"], im["path"]) for im in by.get(a, []))
+    def take(a):
+        a = a.upper()
+        if a in used: return ""
+        used.add(a); return figs(a)
+    frag = re.sub(r'<(div|p|span|figure)\b[^>]*\bdata-a\s*=\s*["\']?(S\d+|END)["\']?[^>]*>\s*</\1\s*>', lambda m: take(m.group(2)), frag, flags=re.I)
+    frag = re.sub(r'<(div|p|span)\b[^>]*\bdata-a\s*=\s*["\']?(S\d+|END)["\']?[^>]*/?>', lambda m: take(m.group(2)), frag, flags=re.I)
+    frag = re.sub(r"(?:<p[^>]*>\s*)?" + ANCHOR_ANY.pattern + r"(?:\s*</p>)?", lambda m: take(m.group(1)), frag)
+    for a in [a for a in by if a not in used]:
+        html_figs = figs(a)
+        pos = None
+        if a == "S0":
+            m = re.search(r"</header>", frag, re.I)
+            pos = m.end() if m else 0
+        elif a != "END":
+            want = call.get("heads", {}).get(a, "")
+            for h in re.finditer(r"<h2\b[^>]*>(.*?)</h2>", frag, re.S | re.I):
+                if not _same_heading(h.group(1), want): continue
+                nxt = re.search(r"<h2\b", frag[h.end():], re.I)
+                stop = h.end() + nxt.start() if nxt else len(frag)
+                sec_end = frag.rfind("</section>", h.end(), stop)
+                if sec_end >= 0: pos = sec_end
+                else:
+                    sec_open = frag.rfind("<section", h.end(), stop)
+                    pos = sec_open if sec_open >= 0 and not frag[sec_open:stop].split(">", 1)[-1].strip() else stop
+                break
+        if pos is None: pos = len(frag)
+        frag = frag[:pos] + html_figs + frag[pos:]
+    return frag
+
+
+def place_images_md(md, call, safe):
+    """Markdown מ-Claude (לסקיל) עם עוגנים -> שורות תמונה (נתיבים בטוחים, בלי רווחים). עוגן שנעלם: לפי כותרת, אחרת בסוף."""
+    imgs = call.get("images") or []
+    by = {}
+    for im in imgs: by.setdefault(im["anchor"], []).append(im)
+    used = set()
+    def lines(a): return "\n\n".join("![%s](%s)" % (im["cap"], safe[im["path"]]) for im in by.get(a, []))
+    def rep(m):
+        a = m.group(1).upper()
+        if a in used: return ""
+        used.add(a); return lines(a)
+    md = re.sub(r"(?m)^[ \t>*-]*" + ANCHOR_ANY.pattern + r"[ \t]*$", rep, md)
+    md = ANCHOR_ANY.sub("", md)
+    out = md.split("\n")
+    for a in [a for a in by if a not in used]:
+        add = ["", lines(a), ""]
+        idx = None
+        if a == "S0": idx = 0
+        elif a != "END":
+            want = call.get("heads", {}).get(a, "")
+            for i, l in enumerate(out):
+                if re.match(r"^#{1,3}\s+", l) and _same_heading(l.lstrip("#"), want):
+                    j = i + 1
+                    while j < len(out) and not re.match(r"^#{1,2}\s+", out[j]): j += 1
+                    idx = j; break
+        if idx is None: idx = len(out)
+        out[idx:idx] = add
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip() + "\n"
+
+
+_SAFE_DIR = []
+def safe_image_copies(call):
+    """הסקריפט של הסקיל רץ בתיקייה זמנית: עותקים של התמונות בנתיבים בלי רווחים וסוגריים (גם ל-Markdown של pdf-guide-maker)."""
+    if not call.get("images"): return {}
+    if not _SAFE_DIR:
+        _SAFE_DIR.append(tempfile.mkdtemp(prefix="timmy-imgs-"))
+        atexit.register(lambda: shutil.rmtree(_SAFE_DIR[0], ignore_errors=True))
+    out = {}
+    for i, im in enumerate(call["images"]):
+        dst = os.path.join(_SAFE_DIR[0], "img%d%s" % (i + 1, os.path.splitext(im["path"])[1].lower()))
+        try:
+            if not is_image_bytes(im["path"]): continue
+            if not os.path.exists(dst): shutil.copyfile(im["path"], dst)
+            out[im["path"]] = dst
+        except Exception:
+            pass
+    return out
+
+
+IMG_CACHE = os.path.join(PDF_DIR, "img_cache.json")
+def cache_get(key):
+    try:
+        for e in json.load(open(IMG_CACHE, encoding="utf-8")).get("entries", []):
+            if e.get("key") == key: return e.get("value")
+    except Exception: pass
+    return None
+
+
+def cache_put(key, value):
+    try:
+        try: entries = json.load(open(IMG_CACHE, encoding="utf-8")).get("entries", [])
+        except Exception: entries = []
+        entries = [e for e in entries if e.get("key") != key][-11:] + [{"key": key, "value": value}]
+        os.makedirs(PDF_DIR, exist_ok=True)
+        tmp = IMG_CACHE + ".tmp%d" % os.getpid()
+        json.dump({"entries": entries}, open(tmp, "w", encoding="utf-8"), ensure_ascii=False)
+        os.replace(tmp, IMG_CACHE)
+    except Exception: pass
+
+
+IMG_RULE = """
+7. בסיכום יש שורות כמו ⟦מקום S1⟧. הן מסמנות איפה טימי יכניס תמונות (צילומי מסך) אחרי שתסיים. כל אחת מהן חייבת להופיע ב-HTML שלך בדיוק פעם אחת, כ-<div data-a="S1"></div> (עם אותו קוד), בסוף הסעיף שבו היא מופיעה בסיכום (לפני סוף ה-section), גם אם שינית כותרות או איחדת סעיפים. ⟦מקום S0⟧ מיד אחרי ה-header. אל תכתוב עליהן כלום ואל תוסיף תמונות בעצמך."""
+IMG_RULE_MD = """
+6. בסיכום יש שורות כמו ⟦מקום S1⟧. הן מסמנות איפה טימי יכניס תמונות (צילומי מסך) אחרי שתסיים. העתק כל אחת מהן בדיוק כמו שהיא, בשורה משלה, בסוף הסעיף שבו היא מופיעה בסיכום, גם אם שינית כותרות או איחדת סעיפים. ⟦מקום S0⟧ בתחילת המסמך. אל תכתוב עליהן כלום ואל תוסיף תמונות בעצמך."""
 
 
 MONTHS = ["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"]
@@ -188,7 +453,7 @@ PDF_PROMPT = """אתה מעצב מסמכים. הפוך את סיכום השיח�
 2. עברית תקינה, ניסוח נקי ומקצועי שמתאים לעיני הלקוח. בלי מקף ארוך.
 3. סדר מומלץ: סיכום, עיקרי הדברים או החלטות, משימות. סעיף בלי תוכן לא מופיע.
 4. אל תכלול הערות פנימיות שלא מתאימות ללקוח (למשל הערכות על הלקוח עצמו).
-5. שם האדם בשורת "עם" כמו שהוא, בלי סוגריים מרובעים.{instructions}{skill}
+5. שם האדם בשורת "עם" כמו שהוא, בלי סוגריים מרובעים.{instructions}{images}{skill}
 {writing}{memory}
 הסיכום (Markdown):
 {md}
@@ -426,12 +691,18 @@ def looks_valid(frag):
 
 def ask_claude(call, brand):
     """גוף המסמך מ-Claude. מחזיר (html, שגיאה)."""
-    claude = claude_path()
-    if not claude: return None, "Claude לא נמצא"
+    imgs = bool(call.get("images"))
     prompt = PDF_PROMPT.format(brand=brand_block(brand), title=call["title"], date=call["date"] or "(לא ידוע)",
                                length=call["length"] or "(לא ידוע)", person=call["person"] or "(לא ידוע)",
-                               instructions=instructions_block(brand), skill=pdf_skill_rules(), writing=writing_guide(), memory=memory_block(),
-                               md=call["body"], transcript=call["transcript"][-40000:] or "(אין)")
+                               instructions=instructions_block(brand), images=IMG_RULE if imgs else "", skill=pdf_skill_rules(),
+                               writing=writing_guide(), memory=memory_block(),
+                               md=call["body_claude"] if imgs else call["body"], transcript=call["transcript"][-40000:] or "(אין)")
+    model = pick_model("summary_model", "sonnet")
+    # שיחה עם תמונות: התוכן של Claude לא תלוי בתמונות (רק בעוגנים), אז שינוי בתמונות לא מחכה שוב ל-Claude
+    key = hashlib.sha1(("html|" + model + "|" + prompt).encode()).hexdigest() if imgs else None
+    if key and cache_get(key): return cache_get(key), None
+    claude = claude_path()
+    if not claude: return None, "Claude לא נמצא"
     try:
         r = run([claude, "-p", "--model", pick_model("summary_model", "sonnet"), "--tools", "", "--strict-mcp-config",
                             "--no-session-persistence"], input=prompt, timeout=left(120), cwd="/tmp")
@@ -442,6 +713,7 @@ def ask_claude(call, brand):
     frag = sanitize(r.stdout)
     if r.returncode != 0 or not looks_valid(frag):
         return None, "Claude לא החזיר מסמך תקין"
+    if key: cache_put(key, frag)
     return frag, None
 
 
@@ -518,6 +790,8 @@ def md_to_html(body):
         m = re.match(r"^\d+[.)]\s+(.*)$", t)
         if m: open_list("ol"); out.append(f"<li>{inline(m.group(1))}</li>"); continue
         if re.fullmatch(r"(-{3,}|\*{3,}|_{3,})", t): close(); out.append("<hr>"); continue
+        im = parse_img_line(t)
+        if im and os.path.isabs(im[1]): close(); out.append(fig_html(*im)); continue
         m = re.match(r"^>\s?(.*)$", t)
         if m: close(); out.append(f"<blockquote>{inline(m.group(1))}</blockquote>"); continue
         if lst: close()
@@ -596,11 +870,17 @@ def fill(tpl, title, content, b):
 
 def keep_headings(html_text):
     """כותרת סעיף לא נשארת לבד בתחתית עמוד: עוטפים אותה יחד עם הבלוק שאחריה (WebKit מתעלם מ-break-after: avoid)."""
-    return re.sub(r"(<h[23]\b[^>]*>.*?</h[23]>\s*<(ul|ol|table|p|blockquote)\b.*?</\2>)",
+    return re.sub(r"(<h[23]\b[^>]*>.*?</h[23]>\s*<(ul|ol|table|p|blockquote|figure)\b.*?</\2>)",
                   r'<div class="keep" style="break-inside:avoid;page-break-inside:avoid">\1</div>', html_text, flags=re.S)
 
 
 def build(md_path, out_path, local=False, preview=False):
+    res = _build(md_path, out_path, local, preview)
+    if isinstance(res, dict) and _MISSING[0]: res["missing_images"] = _MISSING[0]
+    return res
+
+
+def _build(md_path, out_path, local=False, preview=False):
     call = read_call(md_path)
     b = load_brand()
     frag, err, used = None, None, False
@@ -613,7 +893,7 @@ def build(md_path, out_path, local=False, preview=False):
         skill_fail = {"skill": rn["name"], "skill_error": res.get("error") or ""}
         if res.get("md"):   # Claude כבר כתב את התוכן: לא קוראים לו שוב (התקציב של האפליקציה מוגבל), רק מעצבים בתבנית של טימי
             frag = local_html(dict(call, body=re.sub(r"(?m)^:::\w*[ \t]*$", "", res["md"])))
-            page = fill(load_template(), call["title"], frag, b)
+            page = embed_images(fill(load_template(), call["title"], frag, b))
             with open(out_path, "w", encoding="utf-8") as f: f.write(page)
             return dict({"html": out_path, "claude": True, "footer": b["contact"], "brand": norm_hex(b["color"], DEFAULT_ACCENT), "error": None},
                         **skill_fail, skill_failed=True)
@@ -637,7 +917,9 @@ def build(md_path, out_path, local=False, preview=False):
             json.dump({"key": key, "html": frag, "claude": True}, open(PREVIEW_CACHE, "w", encoding="utf-8"), ensure_ascii=False)
     if frag is None:
         frag = local_html(call)
-    page = fill(load_template(), call["title"], frag, b)
+    elif call.get("images"):
+        frag = place_figures_html(frag, call)
+    page = embed_images(fill(load_template(), call["title"], frag, b))
     with open(out_path, "w", encoding="utf-8") as f: f.write(page)
     res = {"html": out_path, "claude": used, "footer": b["contact"], "brand": norm_hex(b["color"], DEFAULT_ACCENT), "error": err}
     if skill_fail: res.update(skill_fail, skill_failed=True)
@@ -935,13 +1217,17 @@ def active_runner():
 
 def local_skill_md(call):
     """גוף הסיכום כ-Markdown נקי לסקיל (בלי כותרת ושורת פרטים: הם עוברים כארגומנטים)."""
-    out = []
+    out, safe = [], safe_image_copies(call)
     for l in call["body"].splitlines():
+        im = parse_img_line(l)
+        if im:   # תמונה: נתיב בטוח (בלי רווחים), בשורה משלה עם שורה ריקה מסביב
+            if safe.get(im[1]): out += ["", "![%s](%s)" % (im[0], safe[im[1]]), ""]
+            continue
         l = re.sub(r"\[\[(?:[^\]|]*\\?\|)?([^\]#|]+)(?:#[^\]]*)?\]\]", r"\1", l)
         l = re.sub(r"^(\s*)[-*+]\s+\[[ ]\]\s+", r"\1- ", l)
         l = re.sub(r"^(\s*)[-*+]\s+\[[xX]\]\s+", r"\1- ✓ ", l)
         out.append(l.replace("—", "-"))
-    return "\n".join(out).strip() + "\n"
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip() + "\n"
 
 
 SKILL_MD_PROMPT = """אתה כותב את התוכן של מסמך סיכום שיחה שנשלח ללקוח. המסמך מעוצב על ידי הסקיל "{name}" של בעל העסק, שמקבל Markdown.
@@ -965,7 +1251,7 @@ SKILL_MD_PROMPT = """אתה כותב את התוכן של מסמך סיכום ש
 2. עברית תקינה, ניסוח נקי ומקצועי שמתאים לעיני הלקוח. בלי מקף ארוך. בלי בלוקי קוד.
 3. סדר מומלץ: סיכום, עיקרי הדברים או החלטות, משימות. סעיף בלי תוכן לא מופיע.
 4. אל תכלול הערות פנימיות שלא מתאימות ללקוח.
-5. כל דבר מופיע פעם אחת: אם הסיכום נכנס לכרטיס פתיחה, אל תחזור עליו בסעיף "סיכום".{instructions}
+5. כל דבר מופיע פעם אחת: אם הסיכום נכנס לכרטיס פתיחה, אל תחזור עליו בסעיף "סיכום".{images}{instructions}
 {writing}{memory}
 הסיכום (Markdown):
 {md}
@@ -978,10 +1264,14 @@ def skill_markdown_from_claude(call, b, rn):
     claude = claude_path()
     if not claude: return None, "Claude לא נמצא"
     guide = rn["recipe"].get("markdown_guide") or skill_structure_excerpt(rn["path"], 2500)
+    imgs = bool(call.get("images"))
     prompt = SKILL_MD_PROMPT.format(name=rn["name"], brand=brand_block(b), title=call["title"], date=call["date"] or "(לא ידוע)",
                                     length=call["length"] or "(לא ידוע)", person=call["person"] or "(לא ידוע)", guide=guide,
-                                    instructions=instructions_block(b), writing=writing_guide(), memory=memory_block(),
-                                    md=call["body"], transcript=call["transcript"][-40000:] or "(אין)")
+                                    images=IMG_RULE_MD if imgs else "", instructions=instructions_block(b), writing=writing_guide(), memory=memory_block(),
+                                    md=call["body_claude"] if imgs else call["body"], transcript=call["transcript"][-40000:] or "(אין)")
+    model = pick_model("summary_model", "sonnet")
+    key = hashlib.sha1(("skill|" + rn["path"] + "|" + model + "|" + prompt).encode()).hexdigest() if imgs else None
+    if key and cache_get(key): return place_images_md(cache_get(key), call, safe_image_copies(call)), None
     try:
         # משאירים זמן להרצת הסקיל עצמו (עד 75 שניות) בתוך התקציב של האפליקציה
         r = run([claude, "-p", "--model", pick_model("summary_model", "sonnet"), "--tools", "", "--strict-mcp-config",
@@ -995,6 +1285,9 @@ def skill_markdown_from_claude(call, b, rn):
     md = re.sub(r"\A#\s+[^\n]*\n+", "", md).replace("—", "-")
     if r.returncode != 0 or len(md) < 120 or not re.search(r"^(##|[-*] |\d+\. |\|)", md, re.M):
         return None, "Claude לא החזיר תוכן תקין"
+    if key:
+        cache_put(key, md + "\n")
+        return place_images_md(md + "\n", call, safe_image_copies(call)), None
     return md + "\n", None
 
 
@@ -1004,7 +1297,7 @@ def build_with_skill(call, b, rn, md_path, out_path, local, preview):
                                    rn["path"], rn["recipe"].get("markdown_guide"), linked_skill("writing"), load_memory()],
                                   ensure_ascii=False).encode()).hexdigest()
     md, used, err = None, False, None
-    if preview:
+    if preview and not call.get("images"):   # עם תמונות: המטמון של התמונות (הנתיבים הזמניים לא נשמרים)
         try:
             c = json.load(open(PREVIEW_CACHE, encoding="utf-8"))
             if c.get("key") == key and c.get("md"): md, used = c["md"], True
@@ -1012,7 +1305,7 @@ def build_with_skill(call, b, rn, md_path, out_path, local, preview):
     if md is None and not local:
         md, err = skill_markdown_from_claude(call, b, rn)
         used = md is not None
-        if used and preview:
+        if used and preview and not call.get("images"):
             os.makedirs(PDF_DIR, exist_ok=True)
             json.dump({"key": key, "md": md, "claude": True}, open(PREVIEW_CACHE, "w", encoding="utf-8"), ensure_ascii=False)
     if md is None: md = local_skill_md(call)
@@ -1412,6 +1705,10 @@ def design(request, logo=None, history_file=None):
     elif out_b["logo"] and out_b["logo"] != b["logo"] and not os.path.isfile(os.path.expanduser(out_b["logo"])):
         out_b["logo"] = b["logo"]   # Claude לא ממציא נתיב ללוגו
     changed_b = out_b != load_brand() or not os.path.exists(BRAND_JSON) and out_b != default_brand()
+    # ביקש לוגו, אבל אין קובץ לוגו (לא צורף עכשיו ואין שמור): לא אומרים "הוספתי את הלוגו"
+    has_logo = bool(out_b["logo"]) and os.path.isfile(os.path.expanduser(out_b["logo"]))
+    if not has_logo and "לוגו" in request and "לוגו" in summary and re.search(r"(הוספתי|שמתי|הכנסתי|מיקמתי|הצבתי|עדכנתי)", summary):
+        summary = "עוד אין לי את קובץ הלוגו שלך, אז הוא לא מופיע במסמך. תצרף אותו כאן עם 📎 (PNG או JPG), ואשים אותו בראש כל המסמכים."
     if not changed_t and not changed_b and not changed_r:
         return {"ok": True, "changed": False, "summary": summary or "לא שיניתי כלום", **learn}
     n = snapshot()

@@ -60,6 +60,7 @@ RESTYLE_PROMPT = """לפניך מסמך סיכום של שיחה (Markdown) וא
 2. שורת התאריך, האורך ו"עם" נשארת בדיוק כמו שהיא.
 3. השורה שמתחילה ב-"תמלול מלא:" נשארת בסוף בדיוק כמו שהיא.
 4. אל תמציא שום עובדה שלא מופיעה בתמלול. בלי מקף ארוך.
+5. שורות של תמונה (מתחילות ב-"![") נשארות בדיוק כמו שהן, באותו סעיף.
 החזר רק את המסמך המלא, בלי שום טקסט לפניו או אחריו.
 
 המסמך הנוכחי:
@@ -85,7 +86,30 @@ def restyle(md_text, transcript_text):
           and (date_line is None or date_line in out.splitlines())
           and (tr_line is None or tr_line in out.splitlines())
           and len(out) >= 0.4 * len(md_text.strip()))
-    return out + "\n" if ok else md_text
+    return keep_images(md_text, out) + "\n" if ok else md_text
+
+
+_IMG = __import__("re").compile(r"^\s*!\[[^\]\n]*\]\(.+\)\s*$")
+def keep_images(orig, out):
+    """תמונות שהמשתמש הוסיף ל-PDF (שורות ![כיתוב](נתיב)) לא הולכות לאיבוד בשכתוב: מה שחסר חוזר לסוף הסעיף שלו."""
+    import re as _r
+    mine = set(l.strip() for l in orig.splitlines() if _IMG.match(l))
+    lines = [l for l in out.rstrip("\n").split("\n") if not _IMG.match(l) or l.strip() in mine]   # שורת תמונה ש-Claude שינה: המקור חוזר
+    have = set(l.strip() for l in lines)
+    head = ""
+    for l in orig.splitlines():
+        if l.startswith("## "): head = l
+        if not _IMG.match(l) or l.strip() in have: continue
+        idx = None
+        if head and head in lines:
+            j = lines.index(head) + 1
+            while j < len(lines) and not lines[j].startswith("## ") and not lines[j].startswith("תמלול מלא:"): j += 1
+            idx = j
+        if idx is None:
+            idx = next((i for i, x in enumerate(lines) if x.startswith("תמלול מלא:")), len(lines))
+        lines[idx:idx] = ["", l.strip(), ""]
+        have.add(l.strip())
+    return _r.sub(r"\n{3,}", "\n\n", "\n".join(lines))
 
 # מצב "שפר סיכום קיים": live.py --restyle <קובץ סיכום.md>
 if base == "--restyle":
@@ -99,7 +123,9 @@ if base == "--restyle":
         _md = os.path.expanduser(CFG.get("meetings_dir") or "")
         _copy = os.path.join(_md, os.path.basename(md_path)) if _md else ""
         if _copy and os.path.exists(_copy) and not os.environ.get("LIVE_NO_VAULT"):
-            open(_copy, "w", encoding="utf-8").write(new_text)
+            # בעותק שבתיקיית הפגישות (Obsidian) הנתיבים היחסיים של התמונות לא קיימים: שם בלי שורות התמונה
+            _vault = __import__("re").sub(r"\n{3,}", "\n\n", "\n".join(l for l in new_text.split("\n") if not _IMG.match(l)))
+            open(_copy, "w", encoding="utf-8").write(_vault)
         print(json.dumps({"type": "restyled", "txt": md_path, "changed": True}, ensure_ascii=False), flush=True)
     else:
         print(json.dumps({"type": "restyled", "txt": md_path, "changed": False}, ensure_ascii=False), flush=True)

@@ -56,6 +56,13 @@
   strong { font-weight: 700; }
   mark { background: var(--brand-soft); color: inherit; padding: 0 3px; border-radius: 3px; }
   blockquote { margin: 0 0 12px; padding: 8px 14px; border-right: 3px solid var(--brand); background: #fafafa; color: #333; }
+  /* תמונות (צילומי מסך / תמונות מסרטון): פחות מחצי עמוד, לא נחתכות בין עמודים, כיתוב מתחת. שני צילומי טלפון ברצף: זה לצד זה */
+  figure.timmy-fig { margin: 12px 0 18px; padding: 0; text-align: center; break-inside: avoid; page-break-inside: avoid; }
+  figure.timmy-fig img { display: block; margin: 0 auto; max-width: 100%; max-height: 95mm; width: auto; height: auto; object-fit: contain; border-radius: 10px; border: 1px solid rgba(0,0,0,.09); }
+  figure.timmy-fig.tall img { max-height: 85mm; }
+  .timmy-row { display: flex; direction: rtl; flex-direction: row; justify-content: center; align-items: flex-start; gap: 8mm; margin: 10px 0 16px; break-inside: avoid; page-break-inside: avoid; }
+  .timmy-row figure.timmy-fig { margin: 0; flex: 0 1 auto; max-width: 48%; }
+  figure.timmy-fig figcaption { margin: 7px auto 0; max-width: 92%; font-size: 9.5pt; line-height: 1.5; color: #6e6e73; direction: rtl; text-align: center; }
   body > :last-child, section:last-child, section > :last-child { margin-bottom: 0; }
   hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
 
