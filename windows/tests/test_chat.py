@@ -424,20 +424,27 @@ def test_pdf_design_adopt_skill_without_script(app_dir, fake_claude, claude_home
 
 # ---- PDF design skill from a sample PDF (QtPdf) ------------------------------------------------------------------
 def make_sample_pdf(path):
-    from PySide6.QtCore import QMarginsF, QRectF
-    from PySide6.QtGui import QColor, QFont, QPageLayout, QPageSize, QPainter, QPdfWriter
-    w = QPdfWriter(str(path))
-    w.setPageLayout(QPageLayout(QPageSize(QPageSize.PageSizeId.A4), QPageLayout.Orientation.Portrait, QMarginsF(0, 0, 0, 0)))
-    w.setResolution(72)
-    p = QPainter(w)
-    p.fillRect(QRectF(0, 0, 595, 120), QColor("#1E3A8A"))
-    p.fillRect(QRectF(40, 160, 200, 8), QColor("#EF4444"))
-    p.setPen(QColor("#22C55E"))
-    f = QFont("Arial")
-    f.setPointSize(18)
-    p.setFont(f)
-    p.drawText(QRectF(40, 200, 500, 40), "Sample Brand Document")
-    p.end()
+    """A one-page A4 PDF written by hand: a blue band, a thin red line and green text in the standard Helvetica font.
+    (QPdfWriter text from the offscreen platform on windows-latest has no extractable text, so a test PDF made with Qt
+    read back empty there; real PDFs from Word / Canva / browsers carry a text layer.)"""
+    content = (b"0.118 0.227 0.541 rg 0 722 595 120 re f\n"          # #1E3A8A
+               b"0.937 0.267 0.267 rg 40 674 200 8 re f\n"           # #EF4444
+               b"BT /F1 18 Tf 0.133 0.773 0.369 rg 40 620 Td (Sample Brand Document) Tj ET\n")
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+            b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % off for off in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    Path(path).write_bytes(bytes(out))
 
 
 def test_create_pdf_skill(qapp, app_dir, fake_claude, claude_home, tmp_path):

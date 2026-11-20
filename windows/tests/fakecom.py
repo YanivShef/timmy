@@ -19,6 +19,26 @@ def com(iids, methods):
     return o
 
 
+def task_wstr(text: str, keep: list) -> int:
+    """A wide string the way COM hands one out. Timmy frees GetId strings with CoTaskMemFree and friendly names with
+    PropVariantClear, which on Windows really free: a ctypes buffer there corrupted the heap (0xc0000374 on
+    windows-latest), so on Windows the fake allocates with CoTaskMemAlloc like the real device does."""
+    return task_copy(ctypes.create_unicode_buffer(text), keep)
+
+
+def task_copy(buf, keep: list) -> int:
+    """`buf` as COM task memory on Windows (the caller frees it with CoTaskMemFree), else the buffer itself."""
+    if not W.IS_WIN:
+        keep.append(buf)
+        return ctypes.addressof(buf)
+    ole = ctypes.WinDLL("ole32")
+    ole.CoTaskMemAlloc.argtypes, ole.CoTaskMemAlloc.restype = [ctypes.c_size_t], c_void_p
+    n = ctypes.sizeof(buf)
+    addr = ole.CoTaskMemAlloc(n)
+    ctypes.memmove(addr, buf, n)
+    return addr
+
+
 def _stub(slots):
     return [(H, (), (lambda this: W.E_NOTIMPL)) for _ in range(slots)]
 
@@ -71,7 +91,7 @@ class FakeAudioClient:
         self.inits = []
         self.started = self.stopped = False
         self.event = "unset"
-        self._mixbuf = None
+        self._mixkeep = []
         self.com = com([W.IID_IAudioClient], [
             (H, (c_int, c_uint32, c_int64, c_int64, c_void_p, c_void_p), self.initialize),     # 3
             *_stub(4),                                                                        # 4..7
@@ -103,8 +123,7 @@ class FakeAudioClient:
         w.wBitsPerSample, w.nBlockAlign, w.cbSize = self.mix.bits, self.mix.block_align, 22
         sub = W.KSDATAFORMAT_SUBTYPE_IEEE_FLOAT if self.mix.is_float else W.KSDATAFORMAT_SUBTYPE_PCM
         ctypes.memmove(ctypes.addressof(buf) + 24, bytes(sub), 16)
-        self._mixbuf = buf
-        pp[0] = ctypes.addressof(buf)
+        pp[0] = task_copy(buf, self._mixkeep)
         return W.S_OK
 
     def start(self, this):
@@ -151,9 +170,7 @@ class FakeDevice:
         return W.S_OK
 
     def get_id(self, this, pp):
-        b = ctypes.create_unicode_buffer(self.id)
-        self._keep.append(b)
-        pp[0] = ctypes.addressof(b)
+        pp[0] = task_wstr(self.id, self._keep)
         return W.S_OK
 
     def open_store(self, this, mode, pp):
@@ -165,7 +182,8 @@ class FakeDevice:
 
 class FakePropertyStore:
     def __init__(self, name):
-        self.name = ctypes.create_unicode_buffer(name)
+        self.name = name
+        self._keep = []
         self.com = com([], [*_stub(2), (H, (POINTER(W.PROPERTYKEY), POINTER(W.PROPVARIANT)), self.get_value)])
 
     def get_value(self, this, key, pv):
@@ -174,7 +192,7 @@ class FakePropertyStore:
             return W.E_INVALIDARG
         v = pv.contents
         v.vt = W.VT_LPWSTR
-        c_void_p.from_buffer(v, 8).value = ctypes.addressof(self.name)
+        c_void_p.from_buffer(v, 8).value = task_wstr(self.name, self._keep)
         return W.S_OK
 
 

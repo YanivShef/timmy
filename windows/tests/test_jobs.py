@@ -115,8 +115,12 @@ def test_windows_job_handle_and_priority():
         job.close()
     p.wait(10)
     # BELOW_NORMAL priority (the worker on CPU): in a child, so the test runner keeps its own priority
-    code = ("from timmy.winsys import jobs; import ctypes; assert jobs.lower_priority(); "
-            "print(ctypes.windll.kernel32.GetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess()))")
+    # (restype / argtypes: with ctypes' default int the pseudo-handle -1 reaches GetPriorityClass truncated to 32 bits and
+    # it returns 0, which made this check fail on windows-latest although the priority was set)
+    code = ("from timmy.winsys import jobs; import ctypes; from ctypes import wintypes; assert jobs.lower_priority(); "
+            "k = ctypes.WinDLL('kernel32'); k.GetCurrentProcess.restype = wintypes.HANDLE; "
+            "k.GetPriorityClass.argtypes = [wintypes.HANDLE]; k.GetPriorityClass.restype = wintypes.DWORD; "
+            "print(k.GetPriorityClass(k.GetCurrentProcess()))")
     from tests.conftest import WIN
     r = subprocess.run([PY, "-c", code], cwd=WIN, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr

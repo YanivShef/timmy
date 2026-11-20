@@ -585,13 +585,16 @@ def test_worker_with_the_real_model(rec, app_dir, fake_claude):
     ch1 = place(26, [(8.0, r), (22.0, r)])
     env = env_for(fake_claude, TIMMY_ASR_BACKEND="", TIMMY_ASR_PROFILE="cpu")
     events, rc, err, wall = WF.run_worker(rec / "2026-11-20 20-00-00 כרום", ch0, ch1, env, speed=1, timeout=900)
+    log = next((e for e in WF.stderr_events(err) if e.get("event") == "asr"), None)
+    # written before the checks, so a failing CI run still uploads what the worker did (events, timings, stderr)
+    (WIN / "out").mkdir(exist_ok=True)
+    (WIN / "out" / "worker-real-model.json").write_text(json.dumps({"asr": log, "wall_s": round(wall, 1), "rc": rc, "events": events,
+                                                                   "stderr": err[-20000:]}, ensure_ascii=False, indent=1),
+                                                        encoding="utf-8")
     assert rc == 0, err
     finals = [(e["speaker"], e["t"], e["text"]) for e in events if e["type"] == "final"]
     assert [(s, t) for s, t, _ in finals] == [("other", "00:00:00"), ("me", "00:00:07"), ("other", "00:00:14"), ("me", "00:00:21")]
     for s, _, text in finals:
         for w in (("פגישה", "שלישי", "הצעת המחיר") if s == "other" else ("בסדר גמור", "ההצעה", "מחר")):
             assert w in text, text
-    log = next(e for e in WF.stderr_events(err) if e.get("event") == "asr")
-    (WIN / "out").mkdir(exist_ok=True)
-    (WIN / "out" / "worker-real-model.json").write_text(json.dumps({"asr": log, "wall_s": round(wall, 1), "events": events},
-                                                                  ensure_ascii=False, indent=1), encoding="utf-8")
+    assert log is not None
