@@ -17,6 +17,10 @@ on:
         description: "Also measure ivrit.ai CT2 transcription speed on the runner CPU (downloads 1.6 GB)"
         type: boolean
         default: false
+      asr_real:
+        description: "Run the worker with the real ivrit.ai model (job asr-real; the model is cached between runs)"
+        type: boolean
+        default: true
 
 concurrency:
   group: windows-${{ github.ref }}
@@ -47,7 +51,16 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev,audio]"
+          python -m pip install -e ".[dev,audio,asr,system]"
+
+      # the 75 MB tiny Whisper model for the worker plumbing tests (tests/test_asr.py, tests/test_worker.py)
+      - name: Cache tiny Whisper model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub/models--Systran--faster-whisper-tiny
+          key: hf-faster-whisper-tiny-v1
+      - name: Download tiny Whisper model (no-op when cached)
+        run: python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Systran/faster-whisper-tiny'))"
 
       # Runners have no sound card and Audiosrv may be stopped; try to start it so process-loopback activation can be
       # exercised for real. The WASAPI tests skip (with the HRESULT in the log) whatever this machine cannot do.
@@ -64,6 +77,7 @@ jobs:
           python -c "import sys, platform; print(sys.version); print(platform.platform()); print(sys.getwindowsversion())"
           python -m timmy
           python -m timmy.audio.capture --list
+          python -c "from timmy.engine import asr, claude, files; print('threads', asr.physical_threads(), 'cuda', asr.cuda_available(), 'ffmpeg', files.ffmpeg_path(), 'claude', repr(claude.find_claude()))"
 
       - name: Mac code in sync (tools/sync_mac.py --check)
         run: python tools/sync_mac.py --check
@@ -95,6 +109,45 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-test-output
+          path: windows/out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  asr-real:
+    name: worker with the real ivrit.ai model (fixture, CPU)
+    if: github.event_name == 'push' || inputs.asr_real
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: windows/pyproject.toml
+      - name: Install
+        run: python -m pip install -e ".[dev,asr,system]"
+      - name: Cache the ivrit.ai model (1.6 GB)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub/models--ivrit-ai--whisper-large-v3-turbo-ct2
+          key: hf-ivrit-ai-whisper-large-v3-turbo-ct2-v1
+      - name: Download model (no-op when cached)
+        run: python -c "from huggingface_hub import snapshot_download; print(snapshot_download('ivrit-ai/whisper-large-v3-turbo-ct2'))"
+      - name: Real-model tests (asr + worker, cpu profile, real time)
+        env:
+          TIMMY_TEST_REAL_MODEL: "1"
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          python -m pytest -v -m slow tests/test_asr.py tests/test_worker.py --junitxml=out/junit-asr-real.xml 2>&1 | Tee-Object -FilePath out/pytest-asr-real.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asr-real-output
           path: windows/out/
           if-no-files-found: ignore
           retention-days: 14

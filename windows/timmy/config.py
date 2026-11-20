@@ -18,7 +18,7 @@ KNOWN_KEYS = (
     "linked_skills", "greenolink_fallback_off",
 )
 # Windows-only additions (ignored by the Mac app)
-WINDOWS_KEYS = ("asr_model", "asr_device", "asr_compute_type", "launch_at_login")
+WINDOWS_KEYS = ("asr_model", "asr_model_path", "asr_device", "asr_compute_type", "asr_profile", "asr_threads", "launch_at_login")
 
 DEFAULTS = {
     "owner_name": "אני",
