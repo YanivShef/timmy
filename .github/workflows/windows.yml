@@ -1,11 +1,5 @@
 name: windows
 
-# INSTALL LOCATION: this file belongs at .github/workflows/windows.yml. It is kept here because the GitHub token on the
-# dev machine has no "workflow" scope (GitHub refuses pushes that add workflow files without it). To enable CI:
-#   gh auth refresh -h github.com -s workflow
-#   git switch windows && mkdir -p .github/workflows && git mv windows/ci/windows.yml .github/workflows/windows.yml
-#   git commit -m "CI: enable the Windows workflow" && git push
-
 # Timmy for Windows (windows/). Runs on every push to the "windows" branch and on demand.
 # Agents: git push, then `gh run watch` / `gh run view --log-failed`; artifacts with `gh run download`.
 on:
