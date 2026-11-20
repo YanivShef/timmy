@@ -27,6 +27,8 @@ env:
   # UI tests run offscreen (screenshots with QWidget.grab, PDFs with QtWebEngine); the screen-share hiding test starts
   # its own process with the native "windows" platform (tests/affinity_probe.py)
   QT_QPA_PLATFORM: offscreen
+  # the offscreen platform does not use the Windows font system: without this every glyph in the screenshots is a box
+  QT_QPA_FONTDIR: C:\Windows\Fonts
   QTWEBENGINE_CHROMIUM_FLAGS: "--disable-gpu"
 
 jobs:

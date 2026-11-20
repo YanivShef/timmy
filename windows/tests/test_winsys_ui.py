@@ -56,18 +56,33 @@ def test_startup_registry_roundtrip():
         startup.disable(name)
 
 
+_ALIVE = []
+
+
 def test_single_instance(qapp):
+    """The second launch is another process (as in real use): it sends "show" and waits for the running Timmy's "ok",
+    while this one runs its event loop. A second instance in this process sees the first one too."""
+    import subprocess
+    import sys
+
+    from tests.conftest import WIN
     from timmy.winsys.instance import SingleInstance, send_to_running
     name = f"timmy-test-instance-{os.getpid()}"
     first = SingleInstance(name)
+    _ALIVE.append(first)                   # the app keeps its one instance for the whole run; never freed mid loop here
     got = []
     first.message.connect(got.append)
     try:
         assert first.listen() is True
+        code = f"from timmy.winsys.instance import send_to_running; print(send_to_running('show', {name!r}))"
+        p = subprocess.Popen([sys.executable, "-c", code], cwd=WIN, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env={**os.environ, "PYTHONPATH": str(WIN)})
+        assert wait_until(qapp, lambda: got == ["show"] and p.poll() is not None, 20), (got, p.poll())
+        out, err = p.communicate(timeout=10)
+        assert out.strip() == "True", err
         second = SingleInstance(name)
-        assert second.listen() is False
-        assert send_to_running("show", name)
-        assert wait_until(qapp, lambda: got == ["show"], 5), got
+        _ALIVE.append(second)
+        assert second.listen() is False    # (in-process: no "ok" can come back while this thread waits; still True)
     finally:
         first.close()
     assert send_to_running("show", name, timeout_ms=300) is False

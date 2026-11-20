@@ -32,6 +32,14 @@ def send_to_running(message: str = "show", name: str | None = None, timeout_ms: 
     s.write((message + "\n").encode("utf-8"))
     s.flush()
     s.waitForBytesWritten(timeout_ms)
+    # wait for the running Timmy's "ok": on a Windows named pipe, closing right after the write can drop the line
+    # before the other side has read it (windows-latest). No answer in time still means another Timmy is there.
+    deadline = timeout_ms * 3
+    got = b""
+    while b"\n" not in got and s.state() == QLocalSocket.LocalSocketState.ConnectedState and deadline > 0:
+        if s.waitForReadyRead(100):
+            got += bytes(s.readAll())
+        deadline -= 100
     s.disconnectFromServer()
     if s.state() != QLocalSocket.LocalSocketState.UnconnectedState:
         s.waitForDisconnected(timeout_ms)
@@ -86,11 +94,18 @@ class SingleInstance(QObject):
             self._done(c)
 
     def _drain(self, c):
-        buf = self._bufs.get(id(c), b"") + bytes(c.readAll())
+        data = bytes(c.readAll()) if c.isOpen() else b""
+        buf = self._bufs.get(id(c), b"") + data
         *lines, rest = buf.split(b"\n")
         self._bufs[id(c)] = rest
         for raw in lines:
             self._emit(raw)
+            try:
+                if c.state() == QLocalSocket.LocalSocketState.ConnectedState:
+                    c.write(b"ok\n")
+                    c.flush()
+            except RuntimeError:
+                pass
 
     def _done(self, c):
         if id(c) not in self._bufs:
@@ -107,4 +122,12 @@ class SingleInstance(QObject):
             self.message.emit(line)
 
     def close(self):
+        for c in self.server.findChildren(QLocalSocket):
+            try:
+                c.readyRead.disconnect(self._on_ready)
+                c.disconnected.disconnect(self._on_gone)
+            except (RuntimeError, TypeError):
+                pass
+            c.abort()
+        self._bufs.clear()
         self.server.close()
