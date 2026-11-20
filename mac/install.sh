@@ -114,15 +114,33 @@ ok "המודל מוכן"
 
 # ---------------------------------------------------------------------------
 step "Claude Code (בשביל הסיכומים והנקודות)"
+# רק נקודת פתיחה: טימי עצמו בודק בכל פעם את כל ההתקנות (גם זו שבתוך אפליקציית Claude) ובוחר את זו שמחוברת לחשבון
+# מבין כמה התקנות: זו עם מספר הגרסה הגבוה (לפי המספרים, לא לפי סדר האותיות: 2.1.400 חדשה מ-2.1.9)
+newest_claude() {
+  local c v
+  for c in "$@"; do
+    [[ -x "$c" ]] || continue
+    v="$(printf '%s' "${c#"$HOME"}" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
+    printf '%s\t%s\n' "${v:-0}" "$c"
+  done | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -f2- || true
+}
 CLAUDE_PATH="$(command -v claude || true)"
-for c in "$HOME/.claude/local/claude" "$HOME/.local/bin/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
+for c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" /opt/homebrew/bin/claude /usr/local/bin/claude; do
   [[ -z "$CLAUDE_PATH" && -x "$c" ]] && CLAUDE_PATH="$c"
 done
 if [[ -z "$CLAUDE_PATH" ]]; then
-  for c in "$HOME"/.nvm/versions/node/*/bin/claude; do [[ -x "$c" ]] && CLAUDE_PATH="$c"; done
+  CLAUDE_PATH="$(newest_claude "$HOME"/.nvm/versions/node/*/bin/claude)"
+fi
+# Claude Code שבתוך אפליקציית Claude (הלשונית Code), למשל כשההתקנה רצה מתוך האפליקציה
+if [[ -z "$CLAUDE_PATH" && -n "${CLAUDE_CODE_EXECPATH:-}" && -x "${CLAUDE_CODE_EXECPATH:-}" ]]; then CLAUDE_PATH="$CLAUDE_CODE_EXECPATH"; fi
+if [[ -z "$CLAUDE_PATH" ]]; then
+  CLAUDE_PATH="$(newest_claude "$HOME/Library/Application Support/Claude/claude-code"/*/*/claude.app/Contents/MacOS/claude)"
 fi
 if [[ -n "$CLAUDE_PATH" ]]; then ok "Claude Code: $CLAUDE_PATH"
-else echo "  ! Claude Code לא נמצא. טימי יתמלל, אבל בלי סיכומים ונקודות."; fi
+  if ! "$CLAUDE_PATH" auth status --json 2>/dev/null | grep -q '"loggedIn": *true'; then
+    echo "  ! Claude Code עוד לא מחובר לחשבון. טימי יציע להתחבר בלחיצה אחת, בדפדפן."
+  fi
+else echo "  ! Claude Code לא נמצא. טימי יתמלל, ובחלון ההגדרה יסביר איך מוסיפים סיכומים ונקודות."; fi
 
 # ---------------------------------------------------------------------------
 step "מעתיק את קבצי טימי ושומר הגדרות"
@@ -131,6 +149,8 @@ cp "$HERE/live.py" "$APP_DIR/live.py"
 cp "$HERE/pdf.py" "$APP_DIR/pdf.py"
 cp "$HERE/pdf_template.html" "$APP_DIR/pdf_template.html"
 cp "$HERE/pdf_sample.md" "$APP_DIR/pdf_sample.md"
+# הסקריפט שנכנס לסקילי PDF שטימי יוצר מקובץ (scripts/render.py): Markdown -> PDF בעיצוב של הסקיל
+cp "$HERE/skill_render.py" "$APP_DIR/skill_render.py"
 NAME="$NAME" ABOUT="$ABOUT" PEOPLE="$PEOPLE" OUTDIR="$OUTDIR" DEFAULT_OUTDIR="$DEFAULT_OUTDIR" CLAUDE_PATH="$CLAUDE_PATH" FFMPEG="$FFMPEG" \
 CFG="$APP_DIR/config.json" "$APP_DIR/venv/bin/python" - <<'PY'
 import json, os
@@ -197,7 +217,7 @@ PLIST
 xattr -cr "$APP" 2>/dev/null || true
 # חתימה: אם יש במחשב תעודת מפתח של אפל (Developer ID / Apple Development), חותמים איתה,
 # כך שההרשאות (הקלטת מסך, מיקרופון) נשמרות גם אחרי עדכונים. אחרת חתימה מקומית (ad-hoc).
-SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -E '"(Developer ID Application|Apple Development):' | head -1 | awk '{print $2}')"
+SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep -E '"(Developer ID Application|Apple Development):' | head -1 | awk '{print $2}' || true)"
 if [[ -n "$SIGN_ID" ]] && codesign --force --deep -s "$SIGN_ID" "$APP" >/dev/null 2>&1; then
   ok "נחתם עם תעודת המפתח שלך (ההרשאות יישמרו בעדכונים)"
 else
@@ -226,6 +246,7 @@ fi
 step "בדיקה אחרונה"
 "$APP_DIR/venv/bin/python" -c "import ast; ast.parse(open('$APP_DIR/live.py').read())" || fail "קובץ המנוע פגום."
 "$APP_DIR/venv/bin/python" -c "import ast; ast.parse(open('$APP_DIR/pdf.py').read())" || fail "קובץ ה-PDF פגום."
+"$APP_DIR/venv/bin/python" -c "import ast; ast.parse(open('$APP_DIR/skill_render.py').read())" || fail "קובץ יצירת הסקילים פגום."
 [[ -x "$APP/Contents/MacOS/CallRecorder" ]] || fail "האפליקציה לא הותקנה."
 ok "הכל מוכן"
 

@@ -36,15 +36,19 @@ func loadConfig() -> [String: Any] {
           let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
     return o
 }
+// נכתב גם מתהליכונים ברקע (בדיקת Claude Code): נעילה, וכתיבה אטומית (מי שקורא באמצע לא רואה קובץ ריק)
+private let configLock = NSLock()
 func saveConfig(_ updates: [String: Any]) {
+    configLock.lock(); defer { configLock.unlock() }
+    // קובץ שלא נקרא כ-JSON (למשל נערך ביד ונשבר): לא דורסים אותו. "{}" ריק זה בסדר
     if FileManager.default.fileExists(atPath: configURL.path) && loadConfig().isEmpty,
-       let raw = try? Data(contentsOf: configURL), raw.count > 2 {
+       let raw = try? Data(contentsOf: configURL), raw.count > 2, (try? JSONSerialization.jsonObject(with: raw)) as? [String: Any] == nil {
         NSLog("config.json לא תקין, לא שומר כדי לא למחוק הגדרות"); return
     }
     var c = loadConfig()
     for (k, v) in updates { c[k] = v }
     try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
-    if let d = try? JSONSerialization.data(withJSONObject: c, options: [.prettyPrinted, .withoutEscapingSlashes]) { try? d.write(to: configURL) }
+    if let d = try? JSONSerialization.data(withJSONObject: c, options: [.prettyPrinted, .withoutEscapingSlashes]) { try? d.write(to: configURL, options: .atomic) }
 }
 // תיקיית ההקלטות נקראת מחדש בכל פעם (אפשר לשנות אותה באונבורדינג)
 var recDir: URL {
@@ -768,6 +772,23 @@ var scrimColor: Color { .black.opacity(Theme.bgIsLight ? 0.28 : 0.55) }
 func styleWindow(_ w: NSWindow?) {
     guard let w else { return }
     w.backgroundColor = NSColor(bgColor); w.appearance = themeAppearance
+    applyShareHiding(w)
+}
+
+// הסתרה בשיתוף מסך (config: hide_in_screen_share, ברירת מחדל: מופעל).
+// sharingType = .none מוציא את החלון מכל לכידת מסך (ScreenCaptureKit שכרום/גוגל מיט משתמשים בו לשיתוף "כל המסך",
+// וגם screencapture). החלון נשאר גלוי על המסך שלך, וההקלטה (קול) לא מושפעת. כבוי = רואים את טימי בשיתוף (להדגמות)
+var hideInScreenShare: Bool { (loadConfig()["hide_in_screen_share"] as? Bool) ?? true }
+func applyShareHiding(_ w: NSWindow?, hide: Bool = hideInScreenShare) {
+    guard let w else { return }
+    let t: NSWindow.SharingType = hide ? .none : .readOnly
+    if w.sharingType != t { w.sharingType = t }
+}
+// שינוי ההגדרה חל מיד על כל החלונות הפתוחים (הבועה, השיחות שלי, הצ'אטים, ההגדרות)
+func setHideInScreenShare(_ on: Bool) {
+    saveConfig(["hide_in_screen_share": on])
+    for w in NSApp.windows { applyShareHiding(w, hide: on) }
+    Onboarding.shared?.hideInShare = on
 }
 
 // זיהוי הוראת צבע ("תחליף לצבע כחול", "#1E90FF", "תחזיר לכתום"). מחזיר hex, או "reset", או nil אם זו לא הוראת צבע
@@ -1381,6 +1402,10 @@ final class BubbleHost: NSHostingView<BubbleView> {
             m.addItem(item)
         }
         m.addItem(withTitle: r.hideLive ? "הצג תמלול חי" : "הסתר תמלול חי", action: #selector(AppDelegate.toggleHideLive), keyEquivalent: "")
+        let share = NSMenuItem(title: "להסתיר את טימי בשיתוף מסך", action: #selector(AppDelegate.toggleHideInShare), keyEquivalent: "")
+        share.state = hideInScreenShare ? .on : .off
+        share.toolTip = "כשאתה משתף מסך (למשל בגוגל מיט), מי שצופה לא יראה את טימי. טימי גם לא יופיע בצילומי מסך. כבה אם אתה רוצה להראות את טימי או לצלם אותו"
+        m.addItem(share)
         m.addItem(.separator())
         m.addItem(withTitle: "השיחות שלי…", action: #selector(AppDelegate.openCalls), keyEquivalent: "")
         m.addItem(withTitle: "פתח תיקיית הקלטות", action: #selector(AppDelegate.openFolder), keyEquivalent: "")
@@ -1407,6 +1432,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         // בדיקות: יצירת PDF משורת הפקודה, בלי בועה ובלי חלונות
         if args.contains("--make-pdf") { _ = onboarding; runPDFCLI(); return }
+        // בדיקות: איזה Claude Code נבחר ומה המצב שלו (JSON), ויוצא
+        if args.contains("--claude-check") {
+            let cands = claudeCandidatePaths()
+            let d = detectClaude()
+            let st: String
+            switch d.state { case .ok: st = "ok"; case .notInstalled: st = "notInstalled"; case .notLoggedIn: st = "notLoggedIn"
+                             case .problem(let m): st = "problem: " + m; default: st = "\(d.state)" }
+            var o: [String: Any] = ["state": st, "path": d.path ?? "", "note": d.note, "candidates": cands, "saved": loadConfig()["claude_path"] ?? ""]
+            if args.contains("--health"), let p = d.path, d.state == .ok {
+                switch claudeHealthCheck(p) { case .ok: o["health"] = "ok"; case .auth: o["health"] = "auth"; case .failed(let m): o["health"] = m }
+            }
+            if let j = try? JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted]) { print(String(decoding: j, as: UTF8.self)) }
+            exit(0)
+        }
         // בדיקות: רשימת הסקילים שטימי רואה (+ --find-skill X), ויוצא
         if args.contains("--list-skills") {
             let all = listClaudeSkills()
@@ -1426,6 +1465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isMovable = false
+        applyShareHiding(panel)   // לא רואים את הבועה בשיתוף מסך (אלא אם כיבו בהגדרות)
         let host = BubbleHost(rootView: BubbleView(r: recorder))
         host.onClick = { [weak self] p in self?.clicked(p) }
         host.sizingOptions = []   // החלון לא גדל לבד מהפינה, רק לפי setFrame
@@ -1457,6 +1497,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !UserDefaults.standard.bool(forKey: "onboarded") && !args.contains(where: { $0.hasPrefix("--demo") }) {
             showOnboarding(step: nil)
         }
+        // מי שכבר עבר את ההגדרה (למשל עדכן מגרסה קודמת) ו-Claude Code שלו לא מחובר לחשבון: מקבל פעם אחת את שלב
+        // "החיבור ל-Claude", עם ההתחברות החדשה מתוך טימי. שאר ההגדרות לא משתנות. הבדיקה ברקע ובלי לשאול את Claude
+        if UserDefaults.standard.bool(forKey: "onboarded") && !args.contains(where: { $0.hasPrefix("--demo") })
+            && ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE"] == nil {
+            DispatchQueue.global().async {
+                let d = detectClaude(allowHealth: false)
+                DispatchQueue.main.async {
+                    let o = self.onboarding
+                    guard o.claude == .unknown else { return }
+                    o.claude = d.state; o.claudeNote = d.note; o.claudeFromDesktop = d.path.map(isDesktopClaude) ?? false
+                    if d.state == .notLoggedIn && !UserDefaults.standard.bool(forKey: "claudeLoginNudged") {
+                        UserDefaults.standard.set(true, forKey: "claudeLoginNudged")
+                        self.showOnboarding(step: 4)
+                    }
+                }
+            }
+        }
         if args.contains("--demo-hover") { hover.over = true }
         // --demo-improve / --demo-design-timmy [--demo-chat-send "הודעה"]...
         if args.contains("--demo-improve") || args.contains("--demo-design-timmy") {
@@ -1467,6 +1524,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if args.contains("--demo-memory") { m.showMemory = true }   // פאנל "מה אני זוכר" פתוח
                 for (i, a) in args.enumerated() where a == "--demo-chat-send" && i + 1 < args.count { m.send(args[i + 1]) }
             }
+        }
+        // יצירת סקילים / שימוש בסקיל קיים (בדיקות, עם --demo-exit: מדפיס JSON ויוצא בסוף):
+        //   --demo-create-pdf-skill <קובץ.pdf>           סקיל עיצוב מ-PDF, בחלון "עיצוב ה-PDF"
+        //   --demo-adopt-pdf-skill <שם או נתיב>          חיבור סקיל PDF קיים ושימוש בו (הסקריפט שלו)
+        //   --demo-create-writing-skill <קובץ או טקסט>  סקיל ניסוח, ב"שפר את טימי" [--demo-answers "..."] [--demo-use-calls]
+        if let i = args.firstIndex(of: "--demo-create-pdf-skill"), i + 1 < args.count {
+            DispatchQueue.main.async { self.openPDFDesign(send: nil, createSkillFrom: URL(fileURLWithPath: args[i + 1])) }
+        }
+        if let i = args.firstIndex(of: "--demo-adopt-pdf-skill"), i + 1 < args.count {
+            DispatchQueue.main.async {
+                guard let sk = findSkills(args[i + 1]).first else { demoFinished(["flow": "adopt", "ok": false, "error": "skill not found"]); return }
+                setLinkedSkill("pdf", sk)
+                self.openPDFDesign(send: nil, adopt: sk)
+            }
+        }
+        if let i = args.firstIndex(of: "--demo-create-writing-skill"), i + 1 < args.count {
+            DispatchQueue.main.async {
+                self.openImprove()
+                let v = args[i + 1]
+                var src = WritingSources()
+                if FileManager.default.fileExists(atPath: v) { src.files = [URL(fileURLWithPath: v)] } else { src.pasted = [v] }
+                if let j = args.firstIndex(of: "--demo-answers"), j + 1 < args.count { src.answers = args[j + 1] }
+                src.useCalls = args.contains("--demo-use-calls")
+                var replacing: URL?
+                if let w = linkedSkill("writing"), isTimmyMadeSkill(URL(fileURLWithPath: w.path)) {
+                    replacing = URL(fileURLWithPath: w.path); src.previous = skillMarkdown(URL(fileURLWithPath: w.path), maxTotal: 12000)
+                }
+                self.improve.startWritingSkill(src, replacing: replacing)
+            }
+        }
+        // --demo-cancel-after N: לוחץ "בטל" על יצירת סקיל שרצה (בשני החלונות) אחרי N שניות
+        if let i = args.firstIndex(of: "--demo-cancel-after"), i + 1 < args.count, let sec = Double(args[i + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + sec) { self.pdfDesign.cancelAction?(); self.improve.cancelAction?() }
+        }
+        // --demo-claude-login N / --demo-claude-cancel N: לוחץ "התחבר" / "ביטול" בשלב החיבור ל-Claude אחרי N שניות
+        if let i = args.firstIndex(of: "--demo-claude-login"), i + 1 < args.count, let sec = Double(args[i + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + sec) { self.onboarding.startClaudeLogin() }
+        }
+        // --demo-claude-login-code N [--demo-claude-code CODE M]: "התחבר עם קוד" אחרי N שניות (ומדביק קוד אחרי M שניות)
+        if let i = args.firstIndex(of: "--demo-claude-login-code"), i + 1 < args.count, let sec = Double(args[i + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + sec) { self.onboarding.startClaudeLogin(codeMode: true) }
+        }
+        for (i, a) in args.enumerated() where a == "--demo-claude-code" && i + 2 < args.count {
+            guard let sec = Double(args[i + 2]) else { continue }
+            DispatchQueue.main.asyncAfter(deadline: .now() + sec) { self.onboarding.sendLoginCode(args[i + 1]) }
+        }
+        if let i = args.firstIndex(of: "--demo-claude-cancel"), i + 1 < args.count, let sec = Double(args[i + 1]) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + sec) { self.onboarding.cancelClaudeLogin() }
         }
         if args.contains("--demo-calls") { DispatchQueue.main.async { self.runCallsDemo() } }
         if args.contains("--demo-design") { DispatchQueue.main.async { self.runDesignDemo() } }
@@ -1486,6 +1591,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if args.contains("--demo-cancel-armed") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.recorder.armCancel(for: 3600) } }
         // בדיקות: --test-cancel מריץ "הקלטה" עם תהליך העבודה ומבטל אותה דרך מסלול הלחיצות האמיתי (שתי לחיצות על ה-X)
         if args.contains("--test-cancel") { runCancelTest() }
+        // בדיקות: --demo-share-toggle מחליף את "להסתיר את טימי בשיתוף מסך" אחרי 4 שניות, דרך אותה פונקציה של התפריט וההגדרות
+        if args.contains("--demo-share-toggle") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                self.toggleHideInShare()
+                NSLog("share-toggle hide=\(hideInScreenShare) windows=\(NSApp.windows.map { $0.sharingType.rawValue })")
+            }
+        }
         if let i = args.firstIndex(of: "--demo-message"), i + 1 < args.count {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.recorder.phase = .message(args[i + 1]) }
         }
@@ -1591,6 +1703,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recorder.hideLive.toggle()
         saveConfig(["hide_live_transcript": recorder.hideLive])
     }
+    @objc func toggleHideInShare() { setHideInScreenShare(!hideInScreenShare) }
 
     var onboardingWindow: NSWindow?
     let onboarding = Onboarding()
@@ -1643,7 +1756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // "עיצוב ה-PDF" (צ'אט). send: הוראה שהגיעה מ"שפר את טימי"
     var pdfDesignWindow: NSWindow?
     let pdfDesign = PDFDesignModel()
-    func openPDFDesign(send text: String?) {
+    func openPDFDesign(send text: String?, adopt: SkillInfo? = nil, then extra: String? = nil, createSkillFrom: URL? = nil, pick: Bool = false) {
         if pdfDesignWindow == nil {
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 860),
                              styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -1657,8 +1770,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
         pdfDesignWindow?.makeKeyAndOrderFront(nil)
-        pdfDesign.load()
+        pdfDesign.load(quiet: adopt != nil || createSkillFrom != nil || pick)
         if let text, !text.isEmpty { pdfDesign.send(text) }
+        if let adopt { pdfDesign.adoptSkill(adopt, then: extra) }
+        if let f = createSkillFrom { pdfDesign.createSkill(from: f) } else if pick { DispatchQueue.main.async { self.pdfDesign.pickPDFForSkill() } }
     }
     // דמו לבדיקות: --demo-calls [--demo-select N] [--demo-query X] [--demo-send kind] [--demo-autosend] [--demo-connect] [--demo-gl-connect] [--demo-gl-disconnect]
     func runCallsDemo() {
@@ -1759,6 +1874,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if UserDefaults.standard.bool(forKey: "onboarded") { openCalls() } else { showOnboarding(step: nil) }
         return true
     }
+
+    // "claude auth login" שעוד מחכה לדפדפן לא נשאר לרוץ אחרי שטימי נסגר
+    func applicationWillTerminate(_ n: Notification) { onboarding.cancelClaudeLogin() }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if recorder.phase == .recording {
@@ -2130,6 +2248,514 @@ func skillGuide(_ purpose: String) -> String {
     """
 }
 
+// MARK: - טימי יוצר סקילים חדשים: סקיל עיצוב PDF מקובץ PDF לדוגמה, וסקיל ניסוח בקול של בעל העסק
+// נשמרים ב-<claudeHome>/skills/<slug>/ (גם Claude Code משתמש בהם), אף פעם לא דורסים סקיל קיים, ומתחברים לטימי מיד.
+// סקיל שטימי יצר מסומן ב-frontmatter תחת metadata: "created-by: timmy" (רק אותו מותר להעביר לפח כשמחליפים).
+
+// slug באנגלית, באותיות קטנות ומקפים ("Studio Dana PDF" -> "studio-dana-pdf")
+func skillSlug(_ raw: String, fallback: String) -> String {
+    var s = raw.lowercased().applyingTransform(.toLatin, reverse: false)?.applyingTransform(.stripDiacritics, reverse: false) ?? raw.lowercased()
+    s = s.replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    if s.count > 48 { s = String(s.prefix(48)).trimmingCharacters(in: CharacterSet(charactersIn: "-")) }
+    return s.count >= 3 ? s : fallback
+}
+// תיקייה פנויה: slug, slug-2, slug-3... (גם אם יש סקיל באותו שם במקום אחר, למשל תוסף)
+func uniqueSkillDir(_ slug: String) -> URL {
+    let base = claudeHome.appendingPathComponent("skills")
+    let taken = Set(listClaudeSkills().map { $0.name.lowercased().components(separatedBy: ":").last ?? "" })
+    var n = 1
+    while true {
+        let name = n == 1 ? slug : "\(slug)-\(n)"
+        let u = base.appendingPathComponent(name)
+        if !FileManager.default.fileExists(atPath: u.path) && !taken.contains(name) { return u }
+        n += 1
+    }
+}
+func yamlQuoted(_ s: String) -> String {
+    "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: " ") + "\""
+}
+func isTimmyMadeSkill(_ dir: URL) -> Bool {
+    guard let t = try? String(contentsOf: dir.appendingPathComponent("SKILL.md"), encoding: .utf8) else { return false }
+    return t.prefix(1500).range(of: "(?m)^\\s*created-by:\\s*\"?timmy\"?\\s*$", options: .regularExpression) != nil   // metadata: created-by (וגם המפתח הישן בראש ה-frontmatter)
+}
+// "===NAME===\n...\n===SKILL===\n..." -> מילון
+func splitSections(_ text: String) -> [String: String] {
+    var out: [String: String] = [:], key: String?, buf: [String] = []
+    for l in text.components(separatedBy: "\n") {
+        let t = l.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("==="), t.hasSuffix("==="), t.count > 6 {
+            if let k = key { out[k] = buf.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines) }
+            key = String(t.dropFirst(3).dropLast(3)).uppercased(); buf = []
+        } else if key != nil { buf.append(l) }
+    }
+    if let k = key { out[k] = buf.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines) }
+    for (k, v) in out where v.hasPrefix("```") {
+        var lines = v.components(separatedBy: "\n"); lines.removeFirst()
+        if lines.last?.trimmingCharacters(in: .whitespaces).hasPrefix("```") == true { lines.removeLast() }
+        out[k] = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return out
+}
+// כותב סקיל לתיקייה זמנית ואז מעביר בבת אחת (לא נשאר סקיל חצי כתוב)
+func installSkill(staging: URL, to dest: URL) -> Bool {
+    let fm = FileManager.default
+    try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+    guard !fm.fileExists(atPath: dest.path) else { return false }
+    do { try fm.moveItem(at: staging, to: dest); return true } catch {
+        do { try fm.copyItem(at: staging, to: dest); try? fm.removeItem(at: staging); return true } catch { return false }
+    }
+}
+
+// ---------- PDF לדוגמה: עמודים כתמונות, טקסט למבנה, צבעים מדודים, פונטים, גודל עמוד ----------
+struct PDFSample { var pages: [URL] = []; var text = ""; var colors: [(hex: String, share: Double)] = []; var fonts: [String] = []; var pageSize = ""; var pageCount = 0 }
+
+func pdfFontNames(_ doc: PDFDocument, pages: Int) -> [String] {
+    final class Box { var names: [String] = [] }
+    let box = Box()
+    for i in 0..<min(pages, doc.pageCount) {
+        guard let dict = doc.page(at: i)?.pageRef?.dictionary else { continue }
+        var res: CGPDFDictionaryRef?, fonts: CGPDFDictionaryRef?
+        guard CGPDFDictionaryGetDictionary(dict, "Resources", &res), let res, CGPDFDictionaryGetDictionary(res, "Font", &fonts), let fonts else { continue }
+        CGPDFDictionaryApplyBlock(fonts, { _, obj, _ in
+            var fd: CGPDFDictionaryRef?, nm: UnsafePointer<CChar>?
+            if CGPDFObjectGetValue(obj, .dictionary, &fd), let fd, CGPDFDictionaryGetName(fd, "BaseFont", &nm), let nm {
+                var n = String(cString: nm)
+                if let r = n.range(of: "^[A-Z]{6}\\+", options: .regularExpression) { n.removeSubrange(r) }   // תת-קבוצה מוטמעת: ABCDEF+Heebo-Bold
+                if !n.isEmpty && !box.names.contains(n) { box.names.append(n) }
+            }
+            return true
+        }, nil)
+    }
+    return box.names
+}
+// הצבעים הבולטים בעמודים (אחוז מהשטח), מקובצים: הערכים המדויקים ש-Claude צריך במקום לנחש מהתמונה
+func dominantColors(_ reps: [NSBitmapImageRep]) -> [(hex: String, share: Double)] {
+    var buckets: [Int: (r: Int, g: Int, b: Int, n: Int)] = [:], total = 0
+    for rep in reps {
+        guard let data = rep.bitmapData else { continue }
+        let spp = rep.samplesPerPixel, bpr = rep.bytesPerRow
+        for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
+            for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
+                let o = y * bpr + x * spp
+                let r = Int(data[o]), g = Int(data[o + 1]), b = Int(data[o + 2])
+                let k = (r >> 3) << 10 | (g >> 3) << 5 | (b >> 3)
+                let v = buckets[k] ?? (0, 0, 0, 0)
+                buckets[k] = (v.r + r, v.g + g, v.b + b, v.n + 1); total += 1
+            }
+        }
+    }
+    guard total > 0 else { return [] }
+    var groups: [(r: Double, g: Double, b: Double, n: Int)] = []
+    for v in buckets.values.sorted(by: { $0.n > $1.n }).prefix(1500) {
+        let c = (Double(v.r) / Double(v.n), Double(v.g) / Double(v.n), Double(v.b) / Double(v.n))
+        if let i = groups.firstIndex(where: { abs($0.r - c.0) + abs($0.g - c.1) + abs($0.b - c.2) < 30 }) { groups[i].n += v.n }
+        else { groups.append((c.0, c.1, c.2, v.n)) }
+    }
+    func hex(_ g: (r: Double, g: Double, b: Double, n: Int)) -> String { String(format: "#%02X%02X%02X", Int(g.r.rounded()), Int(g.g.rounded()), Int(g.b.rounded())) }
+    let sorted = groups.sorted { $0.n > $1.n }
+    var out: [(hex: String, share: Double)] = sorted.prefix(14).compactMap { g in
+        let share = Double(g.n) / Double(total)
+        return share >= 0.0015 ? (hex(g), share) : nil
+    }
+    // צבע הדגשה של מותג תופס לפעמים שטח קטן מאוד (כתום בכותרת, קו דק): צבעים רוויים נמדדים גם מ-0.02%
+    let accents = sorted.filter { g in
+        let share = Double(g.n) / Double(total), sat = max(g.r, g.g, g.b) - min(g.r, g.g, g.b)
+        return share >= 0.0002 && sat >= 70 && !out.contains { $0.hex == hex(g) }
+    }.prefix(4)
+    out += accents.map { (hex($0), Double($0.n) / Double(total)) }
+    return out
+}
+struct SkillErr: Error { let msg: String }
+func analyzePDF(_ url: URL, into dir: URL, maxPages: Int = 4, width: CGFloat = 1200) -> Result<PDFSample, SkillErr> {
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: url.path) else { return .failure(SkillErr(msg: "לא מצאתי את הקובץ. אולי הוא הועבר או נמחק?")) }
+    let head = (try? FileHandle(forReadingFrom: url))?.readData(ofLength: 1024) ?? Data()
+    if head.isEmpty { return .failure(SkillErr(msg: "הקובץ ריק (0 בתים). אולי הוא לא הורד עד הסוף? נסה להוריד או לייצא אותו שוב.")) }
+    guard head.range(of: Data("%PDF".utf8)) != nil else {
+        return .failure(SkillErr(msg: "זה לא באמת קובץ PDF" + (url.pathExtension.lowercased() == "pdf" ? " (השם נגמר ב-.pdf, אבל התוכן הוא משהו אחר)" : "") + ". פתח את המסמך המקורי וייצא אותו ל-PDF דרך \"הדפס\" ← \"שמור כ-PDF\"."))
+    }
+    guard let doc = PDFDocument(url: url) else { return .failure(SkillErr(msg: "לא הצלחתי לפתוח את ה-PDF. אולי הקובץ פגום? נסה לייצא אותו שוב.")) }
+    if doc.isLocked && !doc.unlock(withPassword: "") {
+        return .failure(SkillErr(msg: "ה-PDF נעול בסיסמה. פתח אותו, שמור עותק בלי סיסמה (הדפס ← שמור כ-PDF) ונסה שוב."))
+    }
+    guard doc.pageCount > 0 else { return .failure(SkillErr(msg: "ה-PDF ריק, אין בו עמודים.")) }
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    var s = PDFSample(); s.pageCount = doc.pageCount
+    var reps: [NSBitmapImageRep] = []
+    for i in 0..<min(maxPages, doc.pageCount) {
+        guard let page = doc.page(at: i) else { continue }
+        let b = page.bounds(for: .mediaBox)
+        guard b.width > 10, b.height > 10 else { continue }
+        let rot = page.rotation % 180 != 0
+        let (pw, ph) = rot ? (b.height, b.width) : (b.width, b.height)
+        let w = Int(width), h = Int(min(width * ph / pw, width * 3))
+        let img = page.thumbnail(of: NSSize(width: w, height: h), for: .mediaBox)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { continue }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.white.setFill(); NSRect(x: 0, y: 0, width: w, height: h).fill()
+        img.draw(in: NSRect(x: 0, y: 0, width: w, height: h))
+        NSGraphicsContext.restoreGraphicsState()
+        let png = dir.appendingPathComponent("page-\(i + 1).png")
+        if let d = rep.representation(using: .png, properties: [:]), (try? d.write(to: png)) != nil { s.pages.append(png); reps.append(rep) }
+        if s.text.count < 3500 { s.text += (page.string ?? "") + "\n" }
+    }
+    guard !s.pages.isEmpty else { return .failure(SkillErr(msg: "לא הצלחתי לקרוא את העמודים של ה-PDF.")) }
+    s.text = String(s.text.prefix(3500))
+    s.colors = dominantColors(reps)
+    s.fonts = pdfFontNames(doc, pages: maxPages)
+    if let b = doc.page(at: 0)?.bounds(for: .mediaBox) {
+        let mmW = Int((b.width * 25.4 / 72).rounded()), mmH = Int((b.height * 25.4 / 72).rounded())
+        let a4 = abs(mmW - 210) <= 3 && abs(mmH - 297) <= 3, letter = abs(mmW - 216) <= 3 && abs(mmH - 279) <= 3
+        s.pageSize = "\(mmW)×\(mmH) מ\"מ" + (a4 ? " (A4)" : letter ? " (Letter)" : "")
+    }
+    return .success(s)
+}
+
+let pdfSkillPrompt = """
+אתה מעצב מסמכים בכיר. {owner} העלה PDF שהוא אוהב את העיצוב שלו (בתמונות: העמודים הראשונים שלו). תבנה ממנו סקיל עיצוב של Claude Code,
+כדי שכל PDF ש{owner} מייצר מעכשיו (סיכומי שיחות ללקוחות, הצעות, מסמכים) ייראה באותה שפה עיצובית בדיוק.
+
+נתונים שנמדדו מהקובץ (מדויקים, תשתמש בהם ולא בהערכה מהעין):
+- גודל עמוד: {page_size}. מספר עמודים: {page_count}.
+- הצבעים הבולטים (אחוז מהשטח, כולל רקע):
+{colors}
+- פונטים שמוטמעים בקובץ: {fonts}
+- טקסט מהעמודים (רק כדי להבין את המבנה, אסור להעתיק אותו לסקיל):
+<<<
+{text}
+>>>
+
+החזר בדיוק בפורמט הזה, בלי שום טקסט לפני או אחרי:
+===NAME===
+שם קצר לסקיל באנגלית, 2 עד 4 מילים שמתארות את הסגנון (למשל warm-studio-pdf-style). בלי שמות של לקוחות.
+===DESCRIPTION===
+משפט או שניים (עברית מותרת): מה הסקיל עושה ומתי להשתמש בו. למשל: "עיצוב PDF בסגנון ... השתמש בו כשמייצרים סיכום שיחה, הצעת מחיר או כל מסמך ללקוח."
+===SUMMARY===
+משפט אחד או שניים בעברית תקינה ופשוטה, בגוף ראשון בתור טימי, ל{owner}: מה למדת מהעיצוב (צבעים, פונט, אופי) במילים, בלי קודי צבע ובלי שמות קבצים. חם וקצר, בלי מקף ארוך.
+===SKILL===
+גוף ה-SKILL.md ב-Markdown (בלי frontmatter, בלי כותרת #). בעברית, עם ערכים טכניים מדויקים. הסעיפים:
+## מתי להשתמש
+## מערכת העיצוב
+  ### צבעים (טבלה: תפקיד | hex | איפה משתמשים. מהצבעים שנמדדו)
+  ### טיפוגרפיה (פונט ראשי ופונט כותרות: שם, משקלים, גדלים ב-pt, גובה שורה. אם הפונט מהקובץ קיים ב-Google Fonts, כתוב את זה; אחרת הפונט הכי קרוב ב-Google Fonts + חלופות מערכת)
+  ### עמוד ושוליים (גודל, שוליים במ"מ, עמודות, רקע)
+  ### ראש המסמך (לוגו: איפה ובאיזה גודל, תווית/pill, כותרת ראשית, שורת משנה)
+  ### כותרות סעיפים, טקסט ורשימות
+  ### טבלאות, כרטיסים, ציטוטים והדגשות
+  ### משימות (אם אין בקובץ, תציע סגנון שמתאים לשפה העיצובית)
+  ### תחתית העמוד
+## כללי עברית ומימין לשמאל
+## האווירה (צפיפות, כמות לבן, מה לעשות ומה לא לעשות כדי לשמור על הסגנון)
+## עמודי דוגמה (references/page-1.png עד page-{n}.png: מה רואים בכל אחד)
+דוגמאות מבנה קצרות מותרות (למשל "כותרת סעיף: מה סוכם"), אבל בלי להעתיק את התוכן הפרטי של הקובץ: בלי שמות, מספרים, טלפונים, כתובות או משפטים מהטקסט.
+עברית תקינה בלבד (בלי מילים בשפות אחרות באמצע משפט, חוץ ממונחים טכניים כמו hex, CSS, pt). כל צבע בטבלה עם hex מדויק מהמדידה; צבע הדגשה קטן שלא נמדד מסמנים "(הוערך מהתמונה)".
+===TEMPLATE===
+תבנית HTML מלאה שמשחזרת את העיצוב, לפי החוזה הזה בדיוק:
+- <!doctype html>, <html dir="rtl" lang="he">, <meta charset="utf-8">, <title>{{TITLE}}</title>, כל ה-CSS בתוך <style> אחד.
+- {{CONTENT}} פעם אחת בדיוק בתוך body. אופציונלי: {{BRAND_HEADER}} (לוגו + שם העסק, מחלקות .brand-bar .logo .brand-name .tagline) לפני {{CONTENT}}, ו-{{FOOTER}} (שורת פרטי קשר, אלמנט footer.doc-foot) בסוף.
+- התוכן שנכנס ל-{{CONTENT}}: header.doc-head (בתוכו .kicker, h1, .meta עם span לכל פרט), ואז section > h2, h3, p, ul/ol/li, table/thead/th/td, blockquote, hr, strong, mark, div.lead (כרטיס פתיחה עם p), ul.tasks > li > span.task + span.owner (משימות עם אחראי). תעצב את כולם.
+- @page { size: ...; margin: ...; } לפי הקובץ: גודל העמוד שנמדד אם הוא עמוד לאורך (למשל size: 180mm 225mm), ואם הוא לרוחב (מצגת) אז A4 לאורך. שוליים לפי הקובץ.
+- רקע העמוד: אם לעמודים בקובץ יש רקע צבעוני או כהה עד הקצה, שים את אותו צבע גם ב-@page (background: #...) וגם ב-html ו-body, עם -webkit-print-color-adjust: exact ו-print-color-adjust: exact, כדי שהעמוד כולו (כולל השוליים) ייצבע כמו בקובץ. אם הרקע לבן או כמעט לבן, השאר לבן.
+- טקסט תמיד בצבע אחיד: בלי טקסט בגרדיאנט (background-clip: text) ובלי -webkit-text-fill-color: transparent. ההדפסה ב-Chrome הופכת את זה למלבן אטום שמסתיר את הטקסט. כותרת "מתכתית" או בגרדיאנט = הצבע הבהיר שלה, אחיד.
+- צבעים כקודי hex קבועים מהמדידה. פונטים: רק מ-fonts.googleapis.com (link או @import) + חלופות מערכת. בלי <script>, בלי תמונות חיצוניות, בלי שום משאב אחר מהרשת.
+- גדלים למסמך של עמוד-שניים: טקסט 10.5 עד 12pt, כותרות סעיפים עד 17pt. מעבר עמוד: לא לשבור טבלה קצרה או משימה באמצע.
+- ראש המסמך: אם בקובץ יש שורת לוגו / שם מותג, עצב את .brand-bar (.logo עד 16mm גובה, .brand-name) באותו מקום ובאותו סגנון, ושים {{BRAND_HEADER}} שם. אם בקובץ יש מספור עמודים או פס עליון/תחתון קבוע, אפשר לחקות אותו ב-CSS בלבד (בלי טקסט קבוע).
+- בלי טקסט קבוע של המסמך המקורי (שמות, מספרים). בלי מקף ארוך.
+"""
+
+let writingSkillPrompt = """
+אתה כותב סקיל ניסוח של Claude Code שמלמד לכתוב בדיוק בקול של {owner}: הודעות וואטסאפ ללקוחות, סיכומים ללקוח ומיילים.
+הסקיל ישמש את טימי (אפליקציה שמנסחת בשם {owner}) וגם את Claude Code. הוא חייב להיות מעשי: כללים ברורים שאפשר לבדוק.
+
+מה {owner} ענה בשיחה עם טימי (טון, מילים שלא משתמש בהן, רשמיות, אימוג'י, חתימה):
+{answers}
+
+השיחה עם טימי (להקשר, הישנה למעלה):
+{history}
+
+מה טימי זוכר על {owner}:
+{memory}
+
+דוגמאות כתיבה של {owner} (קבצים ששלח וטקסט שהדביק):
+<<<
+{samples}
+>>>
+
+{previous}איך {owner} מדבר בשיחות מוקלטות (רק המשפטים שלו, תמלול אוטומטי עם טעויות. זה דיבור ולא כתיבה: קח מזה אוצר מילים, ביטויים חוזרים וחום, לא את המבנה של הדיבור):
+<<<
+{calls}
+>>>
+
+החזר בדיוק בפורמט הזה, בלי שום טקסט לפני או אחרי:
+===NAME===
+שם קצר לסקיל באנגלית, 2 עד 4 מילים (למשל dana-writing-voice). אם ידוע השם של {owner}, אפשר לכתוב אותו באותיות לטיניות.
+===DESCRIPTION===
+משפט או שניים (עברית מותרת): "הקול והסגנון של {owner}. השתמש בו בכל טקסט שנכתב בשמו: הודעות וואטסאפ, סיכומים ללקוח, מיילים."
+===SUMMARY===
+2 עד 3 שורות בעברית, בגוף ראשון בתור טימי, ל{owner}: מה למדת על הסגנון שלו (למשל "אתה כותב קצר וישיר, בגוף ראשון, בלי 'בברכה'"). חם, בלי מקף ארוך.
+===SKILL===
+גוף ה-SKILL.md ב-Markdown (בלי frontmatter, בלי כותרת #), בעברית. הסעיפים:
+## מתי להשתמש
+## הקול (טון, רמת רשמיות, גוף ופנייה, אורך משפטים ופסקאות, קצב)
+## מילים וביטויים (טבלה או שתי רשימות: "כן, ככה הוא כותב" / "אף פעם לא". כולל מילים שביקש לא להשתמש בהן)
+## אימוג'י, סימני פיסוק וחתימה
+## מבנה לפי סוג טקסט (### הודעת וואטסאפ ללקוח, ### סיכום ללקוח, ### מייל)
+## דוגמאות לפני ואחרי (3 עד 4 זוגות קצרים: "לפני" גנרי ו"אחרי" בקול של {owner})
+## מה לא לעשות
+כללים: בסס הכל על הדוגמאות והתשובות. אם משהו לא ידוע, תכתוב ברירת מחדל שמרנית ולא תמציא. אל תעתיק לסקיל משפטים שלמים מהדוגמאות ואל תכתוב פרטים מזהים (טלפונים, מחירים, כתובות).
+שמות של לקוחות מהדוגמאות או מהשיחות אסור שיופיעו בסקיל, גם לא בפנייה ("אהלן דני"): במקום השם כתוב <שם>, למשל "אהלן <שם>,". בדוגמאות לפני/אחרי השתמש בשמות מומצאים אחרים (למשל רוני, טל). הדוגמאות לפני/אחרי מומצאות וקצרות. עברית תקינה, בלי מקף ארוך.
+"""
+
+// הטקסט מקובץ דוגמה: PDF, Word, טקסט, Markdown, RTF
+func readSampleText(_ u: URL, cap: Int = 15000) -> String? {
+    let ext = u.pathExtension.lowercased()
+    var t: String?
+    switch ext {
+    case "pdf":
+        if let d = PDFDocument(url: u), !d.isLocked { t = (0..<min(d.pageCount, 15)).compactMap { d.page(at: $0)?.string }.joined(separator: "\n") }
+    case "docx", "doc", "rtf", "rtfd", "odt", "html", "htm":
+        t = (try? NSAttributedString(url: u, options: [:], documentAttributes: nil))?.string
+    default:
+        t = (try? String(contentsOf: u, encoding: .utf8)) ?? (try? String(contentsOf: u, encoding: .utf16))
+    }
+    guard let s = t?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
+    return String(s.prefix(cap))
+}
+// מה בעל העסק אמר בשיחות המוקלטות (בתמלול: "[00:12] <שם>: טקסט"). רק השורות שלו, מהשיחות האחרונות
+func ownerLinesFromCalls(maxCalls: Int = 12, maxChars: Int = 12000) -> (text: String, calls: Int) {
+    let owner = ((loadConfig()["owner_name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+    let me = owner.isEmpty ? "אני" : owner
+    var out: [String] = [], used = 0, total = 0
+    for c in listCalls().prefix(maxCalls * 2) {
+        guard used < maxCalls, total < maxChars, let t = try? String(contentsOf: c.transcriptURL, encoding: .utf8) else { continue }
+        var mine: [String] = []
+        for l in t.components(separatedBy: "\n") {
+            guard let r = l.range(of: "^\\[[0-9:]+\\]\\s*", options: .regularExpression) else { continue }
+            let rest = l[r.upperBound...]
+            guard rest.hasPrefix(me + ":") else { continue }
+            let line = rest.dropFirst(me.count + 1).trimmingCharacters(in: .whitespaces)
+            if line.count >= 12 { mine.append(line) }
+        }
+        guard !mine.isEmpty else { continue }
+        used += 1
+        let block = mine.joined(separator: "\n")
+        out.append(String(block.prefix(maxChars - total))); total += min(block.count, maxChars - total)
+    }
+    return (out.joined(separator: "\n---\n"), used)
+}
+
+enum SkillMakeResult { case ok(SkillInfo, String), failed(String), cancelled }
+
+// סקיל עיצוב PDF מ-PDF לדוגמה. progress נקרא מה-thread של העבודה
+func createPDFSkill(from pdf: URL, token: CancelToken, progress: @escaping (String) -> Void) -> SkillMakeResult {
+    let fm = FileManager.default
+    let work = fm.temporaryDirectory.appendingPathComponent("timmy-pdfskill-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: work) }
+    progress("קורא את ה-PDF…")
+    let sample: PDFSample
+    switch analyzePDF(pdf, into: work.appendingPathComponent("pages")) {
+    case .failure(let e): return .failed(e.msg)
+    case .success(let s): sample = s
+    }
+    if token.isCancelled { return .cancelled }
+    let owner = ((loadConfig()["owner_name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+    let colors = sample.colors.map { "  \($0.hex) (\(String(format: "%.1f", $0.share * 100))%)" }.joined(separator: "\n")
+    var prompt = pdfSkillPrompt
+    for (k, v) in ["{owner}": owner.isEmpty ? "בעל העסק" : owner, "{page_size}": sample.pageSize.isEmpty ? "לא ידוע" : sample.pageSize,
+                   "{page_count}": "\(sample.pageCount)", "{colors}": colors.isEmpty ? "  (לא נמדד)" : colors,
+                   "{fonts}": sample.fonts.isEmpty ? "לא נמצאו (כנראה סריקה או תמונה)" : sample.fonts.joined(separator: ", "),
+                   "{text}": sample.text.isEmpty ? "(אין טקסט, כנראה סריקה. תסתמך על התמונות)" : sample.text, "{n}": "\(sample.pages.count)"] {
+        prompt = prompt.replacingOccurrences(of: k, with: v)
+    }
+    var sec: [String: String] = [:]
+    var tplErr: String?
+    for attempt in 0..<2 {
+        progress(attempt == 0 ? "לומד את העיצוב: צבעים, פונטים, מבנה. זה לוקח דקה או שתיים…" : "מתקן את התבנית…")
+        let p = attempt == 0 ? prompt : prompt + "\n\nבניסיון הקודם התבנית לא עברה בדיקה: \(tplErr ?? ""). תתקן ותחזיר הכל שוב באותו פורמט."
+        let (text, r) = runClaudeWithImages(p, images: sample.pages, model: "sonnet", timeout: 330, token: token)
+        if r.cancelled || token.isCancelled { return .cancelled }
+        guard let text else {
+            return .failed(r.timedOut ? "לקח יותר מדי זמן ולא קיבלתי תשובה. נסה שוב בעוד רגע." : r.launched ? "לא הצלחתי לנתח את העיצוב עכשיו. נסה שוב בעוד רגע." : "לא מצאתי את Claude Code במחשב, והוא צריך לנתח את העיצוב.")
+        }
+        sec = splitSections(text)
+        guard let skill = sec["SKILL"], skill.count > 400, let tpl = sec["TEMPLATE"], tpl.count > 300 else {
+            tplErr = "חסרים סעיפים"; continue
+        }
+        let tf = work.appendingPathComponent("template.html")
+        try? tpl.write(to: tf, atomically: true, encoding: .utf8)
+        let v = runProcess(python, [pdfScript, "--validate-template", tf.path], timeout: 30)
+        let o = lastJSONObject(v.out, key: "ok")
+        if o?["ok"] as? Bool == true || o == nil && !v.launched { tplErr = nil; break }
+        tplErr = (o?["error"] as? String) ?? "התבנית לא תקינה"
+    }
+    if token.isCancelled { return .cancelled }
+    guard tplErr == nil, let body = sec["SKILL"], let tpl = sec["TEMPLATE"] else {
+        return .failed("לא הצלחתי לבנות מהקובץ תבנית עיצוב תקינה. נסה שוב, או נסה PDF אחר.")
+    }
+    progress("שומר את הסקיל…")
+    let dest = uniqueSkillDir(skillSlug(sec["NAME"] ?? "", fallback: "my-pdf-style"))
+    let slug = dest.lastPathComponent
+    var desc = (sec["DESCRIPTION"] ?? "").replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "—", with: "-")
+    if desc.count < 10 { desc = "עיצוב PDF בסגנון של \(owner.isEmpty ? "העסק" : owner). השתמש בו כשמייצרים סיכום שיחה, הצעת מחיר או כל מסמך PDF ללקוח." }
+    let stage = work.appendingPathComponent("skill")
+    let refs = (1...sample.pages.count).map { "references/page-\($0).png" }
+    let render = appDir.appendingPathComponent("skill_render.py").resolvingSymlinksInPath()   // הקובץ עצמו, לא קיצור דרך
+    let hasRender = fm.fileExists(atPath: render.path)
+    var md = "---\nname: \(slug)\ndescription: \(yamlQuoted(desc))\nmetadata:\n  created-by: timmy\n---\n\n# \(slug)\n\n" + body.replacingOccurrences(of: "—", with: "-")
+    md += "\n\n## איך מייצרים PDF בעיצוב הזה\n\n"
+    md += "כל ה-CSS של העיצוב נמצא ב-`assets/template.html` (תבנית HTML עם המקומות {{TITLE}} ו-{{CONTENT}}). כשמשנים את העיצוב, משנים שם.\n\n"
+    if hasRender {
+        md += "הסקיל כולל סקריפט שהופך Markdown ל-PDF בעיצוב הזה (Python 3 ו-Google Chrome, בלי התקנות נוספות):\n\n"
+        md += "```bash\npython3 \"\(dest.path)/scripts/render.py\" --input doc.md --output doc.pdf --title \"כותרת המסמך\" \\\n  --kicker \"סיכום שיחה\" --meta \"17 בנובמבר 2026 · 24 דק׳ · עם דנה\" --footer \"050-0000000 · example.co.il\"\n```\n\n"
+        md += "- Markdown: `##` לסעיפים, פסקאות, רשימות, טבלאות, `**הדגשה**`, `==סימון==`, `> ציטוט`, `:::lead` ... `:::` לכרטיס פתיחה, `- [ ] משימה (אחראי)` למשימות.\n"
+        md += "- בלי כותרת `#` בתוך ה-Markdown: הכותרת נכנסת מ-`--title`. `--kicker`, `--meta`, `--footer`, `--logo` ו-`--brand` לא חובה.\n"
+        md += "- בלי Chrome: `--html-only` כותב HTML שאפשר להדפיס ל-PDF.\n"
+    }
+    md += "\nעמודי הדוגמה מהקובץ המקורי: " + refs.map { "`\($0)`" }.joined(separator: ", ") + ". כשלא בטוחים איך משהו צריך להיראות, מסתכלים עליהם.\n"
+    md += "\nפרטיות: עמודי הדוגמה הם צילום של המסמך המקורי, כולל התוכן שלו. לפני ששולחים את הסקיל למישהו אחר, מוחקים את התיקייה `references` (העיצוב עצמו נשאר ב-`assets/template.html`). אסור להעתיק את התוכן שבהם למסמכים חדשים.\n"
+    do {
+        try fm.createDirectory(at: stage.appendingPathComponent("references"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: stage.appendingPathComponent("assets"), withIntermediateDirectories: true)
+        try md.write(to: stage.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+        try tpl.replacingOccurrences(of: "—", with: "-").write(to: stage.appendingPathComponent("assets/template.html"), atomically: true, encoding: .utf8)
+        for (i, p) in sample.pages.enumerated() { try fm.copyItem(at: p, to: stage.appendingPathComponent("references/page-\(i + 1).png")) }
+        if hasRender {
+            try fm.createDirectory(at: stage.appendingPathComponent("scripts"), withIntermediateDirectories: true)
+            try fm.copyItem(at: render, to: stage.appendingPathComponent("scripts/render.py"))
+        }
+    } catch { return .failed("לא הצלחתי לשמור את הסקיל בתיקיית הסקילים של Claude. בדוק שיש מקום פנוי בדיסק.") }
+    if token.isCancelled { return .cancelled }
+    guard installSkill(staging: stage, to: dest), let info = readSkill(dest, source: "אישי") else {
+        return .failed("לא הצלחתי לשמור את הסקיל בתיקיית הסקילים של Claude.")
+    }
+    return .ok(info, (sec["SUMMARY"] ?? "").replacingOccurrences(of: "—", with: "-"))
+}
+
+struct WritingSources {
+    var files: [URL] = [], pasted: [String] = [], useCalls = false, answers = "", history = "", previous = ""
+}
+// דוגמאות כתיבה שהמשתמש הדביק בצ'אט. הודעות וואטסאפ קצרות, אחת אחת, הן הדרך הטבעית: לכן לא רק הודעות ארוכות.
+// נאסף: (1) הודעות שהמודל ציין (לפי ההתחלה שלהן), (2) כל הודעה של המשתמש מאז שטימי ביקש דוגמאות, (3) הודעה ארוכה (140+) בכל מקום
+func pastedWritingSamples(_ msgs: [ChatMsg], hinted: [String]) -> [String] {
+    func norm(_ s: String) -> String { s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines) }
+    let user = msgs.filter { $0.fromUser && $0.files == nil }
+    var out: [String] = []
+    func add(_ t: String) { if !out.contains(t) { out.append(t) } }
+    for h in hinted.map(norm) where h.count >= 6 {
+        if let m = user.last(where: { norm($0.text).contains(h) || (h.count > 20 && h.contains(norm($0.text))) }) { add(m.text) }
+    }
+    // מאז שטימי ביקש דוגמאות ("תדביק", "דוגמה"): כל הודעה שנראית כמו טקסט שהוא כתב (לא "כן" / "זהו, תבנה")
+    // הבקשה הראשונה לדוגמאות מאז הניסיון הקודם ליצור סקיל ניסוח (לא "שמרתי אותה כדוגמה" שבא אחר כך)
+    let start = max(0, msgs.lastIndex(where: { !$0.fromUser && ($0.ctx ?? "").contains("סקיל ניסוח") }) ?? 0)
+    if let ask = msgs.indices.first(where: { $0 >= start && !msgs[$0].fromUser && ["תדביק", "להדביק", "הדבק", "דוגמ", "הודעות שכתבת"].contains(where: msgs[$0].text.contains) }) {
+        for m in msgs[(ask + 1)...] where m.fromUser && m.files == nil {
+            let t = norm(m.text)
+            let isCommand = t.count < 40 && ["תבנה", "זהו", "סיימתי", "אלה ההודעות", "יאללה", "תתחיל", "זה הכל"].contains(where: t.contains)
+            let isAnswer = ["אימוג", "חתימה", "מדביק", "הטון", "רשמי"].contains(where: t.contains)   // תשובה לשאלות, לא דוגמה
+            if t.count >= 25 && !isCommand && !isAnswer { add(m.text) }
+        }
+    }
+    for m in user where m.text.count >= 140 { add(m.text) }
+    return out
+}
+// סקיל ניסוח בקול של בעל העסק. replacing: סקיל קודם שטימי יצר, עובר לפח אחרי שהחדש נשמר
+func createWritingSkill(_ src: WritingSources, replacing: URL?, token: CancelToken, progress: @escaping (String) -> Void) -> SkillMakeResult {
+    progress("קורא את הדוגמאות שלך…")
+    var samples: [String] = [], unreadable: [String] = []
+    for f in src.files.prefix(8) {
+        if let t = readSampleText(f) { samples.append("[\(f.lastPathComponent)]\n" + t) } else { unreadable.append(f.lastPathComponent) }
+    }
+    samples += src.pasted.map { "[טקסט שהודבק]\n" + String($0.prefix(8000)) }
+    var calls = (text: "", calls: 0)
+    if src.useCalls { progress("מקשיב לאיך שאתה מדבר בשיחות שהקלטתי…"); calls = ownerLinesFromCalls() }
+    if token.isCancelled { return .cancelled }
+    var sampleText = samples.joined(separator: "\n\n")
+    if sampleText.count > 30000 { sampleText = String(sampleText.prefix(30000)) }
+    guard sampleText.count >= 80 || calls.text.count >= 300 || src.previous.count >= 300 else {
+        var why = src.useCalls
+            ? "בשיחות שהקלטתי עדיין לא מצאתי מספיק ממה שאתה אומר, אז אני צריך עוד דוגמה: צרף קובץ עם 📎 (הודעות, מייל, מסמך), או הדבק כאן כמה הודעות שכתבת."
+            : "כדי ללמוד איך אתה כותב אני צריך דוגמה: צרף קובץ עם 📎 (הודעות, מייל, מסמך), הדבק כאן כמה הודעות שכתבת, או תן לי ללמוד מהשיחות שהקלטתי."
+        if !unreadable.isEmpty { why = "לא הצלחתי לקרוא טקסט מ: " + unreadable.joined(separator: ", ") + ". " + why }
+        return .failed(why)
+    }
+    let owner = ((loadConfig()["owner_name"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+    var prompt = writingSkillPrompt
+    let previous = src.previous.isEmpty ? "" : "הגרסה הקודמת של הסקיל (טימי יצר אותה). תשמור על מה שעבד, ותתקן לפי מה ש{owner} ביקש בשיחה:\n<<<\n" + src.previous + "\n>>>\n\n"
+    let subs: [(String, String)] = [
+        ("{previous}", previous),
+        ("{answers}", src.answers.isEmpty ? "(לא ענה, תסיק מהדוגמאות)" : src.answers),
+        ("{history}", src.history.isEmpty ? "(אין)" : src.history),
+        ("{memory}", memoryBlock()),
+        ("{samples}", sampleText.isEmpty ? "(אין)" : sampleText),
+        ("{calls}", calls.text.isEmpty ? "(אין)" : calls.text),
+        ("{owner}", owner.isEmpty ? "בעל העסק" : owner)]
+    for (k, v) in subs {
+        prompt = prompt.replacingOccurrences(of: k, with: v)
+    }
+    progress("כותב את סקיל הניסוח שלך. זה לוקח כדקה…")
+    let r = runClaude(["-p", "--model", "sonnet", "--tools", "", "--strict-mcp-config", "--no-session-persistence"], input: prompt, timeout: 240, token: token)
+    if r.cancelled || token.isCancelled { return .cancelled }
+    let sec = splitSections(r.out)
+    guard r.ok, let body = sec["SKILL"], body.count > 300 else {
+        return .failed(r.timedOut ? "לקח יותר מדי זמן ולא קיבלתי תשובה. נסה שוב בעוד רגע." : r.launched ? "לא הצלחתי לכתוב את הסקיל עכשיו. נסה שוב בעוד רגע." : "לא מצאתי את Claude Code במחשב, והוא צריך לכתוב את הסקיל.")
+    }
+    progress("שומר את הסקיל…")
+    let fm = FileManager.default
+    let fallbackName = owner.isEmpty ? "my-writing-voice" : skillSlug(owner, fallback: "my") + "-writing-voice"
+    // מחליפים סקיל שטימי יצר: החדש נכנס לאותה תיקייה (אותו שם), והישן עובר לפח
+    let reuse = replacing.map { isTimmyMadeSkill($0) } ?? false
+    let dest = reuse ? replacing! : uniqueSkillDir(skillSlug(sec["NAME"] ?? "", fallback: fallbackName))
+    var desc = (sec["DESCRIPTION"] ?? "").replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "—", with: "-")
+    if desc.count < 10 { desc = "הקול והסגנון של \(owner.isEmpty ? "בעל העסק" : owner). השתמש בו בכל טקסט שנכתב בשמו: הודעות וואטסאפ, סיכומים ללקוח, מיילים." }
+    let md = "---\nname: \(dest.lastPathComponent)\ndescription: \(yamlQuoted(desc))\nmetadata:\n  created-by: timmy\n---\n\n# \(dest.lastPathComponent)\n\n" + body + "\n"
+    let stage = fm.temporaryDirectory.appendingPathComponent("timmy-writeskill-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: stage) }
+    do {
+        try fm.createDirectory(at: stage, withIntermediateDirectories: true)
+        try md.write(to: stage.appendingPathComponent("SKILL.md"), atomically: true, encoding: .utf8)
+    } catch { return .failed("לא הצלחתי לשמור את הסקיל. בדוק שיש מקום פנוי בדיסק.") }
+    var trashed: NSURL?
+    if reuse {
+        do { try fm.trashItem(at: dest, resultingItemURL: &trashed) } catch { return .failed("לא הצלחתי להחליף את הסקיל הקודם. נסה שוב.") }
+    }
+    guard installSkill(staging: stage, to: dest), let info = readSkill(dest, source: "אישי") else {
+        if let t = trashed as URL? { try? fm.moveItem(at: t, to: dest) }   // מחזירים את הקודם מהפח
+        return .failed("לא הצלחתי לשמור את הסקיל בתיקיית הסקילים של Claude.")
+    }
+    var summary = (sec["SUMMARY"] ?? "").replacingOccurrences(of: "—", with: "-")
+    if !unreadable.isEmpty { summary += "\n(לא הצלחתי לקרוא את: " + unreadable.joined(separator: ", ") + ")" }
+    return .ok(info, summary)
+}
+
+// סקילים שמייצרים PDF (לכפתור "יש לי כבר סקיל PDF"): לפי השם והתיאור, הכי מתאימים קודם
+func pdfSkillCandidates() -> [SkillInfo] {
+    let all = listClaudeSkills()
+    let scored = all.map { s -> (SkillInfo, Int) in
+        let n = s.name.lowercased(), d = s.description.lowercased()
+        var sc = (n.contains("pdf") ? 6 : 0) + (d.contains("pdf") ? 3 : 0)
+        for w in ["document", "guide", "מסמך", "מדריך", "brand", "design", "עיצוב"] where n.contains(w) || d.contains(w) { sc += 1 }
+        if sc > 0, FileManager.default.fileExists(atPath: s.dir.appendingPathComponent("scripts").path) { sc += 1 }
+        return (s, sc)
+    }
+    return scored.filter { $0.1 >= 3 }.sorted { $0.1 > $1.1 }.prefix(8).map(\.0)
+}
+// האם ה-PDF-ים יוצאים עכשיו מהסקריפט של הסקיל המחובר (pdf/skill_runner.json, נכתב ע"י pdf.py --skill-setup)
+func skillRunsPDF() -> Bool {
+    guard let l = linkedSkill("pdf"), let d = try? Data(contentsOf: pdfDesignDir.appendingPathComponent("skill_runner.json")),
+          let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let p = o["skill_path"] as? String else { return false }
+    let same = URL(fileURLWithPath: p).resolvingSymlinksInPath().path == URL(fileURLWithPath: l.path).resolvingSymlinksInPath().path
+        || ((o["name"] as? String)?.caseInsensitiveCompare(l.name) == .orderedSame && FileManager.default.fileExists(atPath: l.path))
+    return same && o["disabled"] as? Bool != true
+}
+// בדיקות (--demo-exit): כשתהליך יצירת סקיל מסתיים, מדפיסים שורת JSON ויוצאים
+func demoFinished(_ info: [String: Any]) {
+    guard args.contains("--demo-exit") else { return }
+    if let d = try? JSONSerialization.data(withJSONObject: info), let s = String(data: d, encoding: .utf8) { print(s); fflush(stdout) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(info["ok"] as? Bool == true ? 0 : 1) }
+}
+
 final class TimmyChatModel: ObservableObject {
     let design: Bool
     @Published var msgs: [ChatMsg] = []
@@ -2139,6 +2765,8 @@ final class TimmyChatModel: ObservableObject {
     @Published var showMemory = false
     @Published var memory: [String] = []   // memory.json: מה טימי זוכר על המשתמש
     @Published var skills: [String: String] = [:]   // סקילים מחוברים: מטרה -> שם
+    @Published var attachments: [URL] = []   // קבצים שצורפו (📎 או גרירה) ועוד לא נשלחו
+    @Published var cancelAction: (() -> Void)?   // "בטל" בזמן יצירת סקיל
     private var queue: [String] = []
     private var loaded = false
     init(design: Bool) {
@@ -2160,7 +2788,7 @@ final class TimmyChatModel: ObservableObject {
     var suggestions: [String] {
         design ? ["עיניים ירוקות", "רקע כחול כהה", "תחליף את הצבע לסגול", "תוריד אנימציות"]
                : ["נקודות קצרות יותר, עד 8 מילים", "תוסיף לסיכום סעיף \"צעדים הבאים ללקוח\"", "תכתוב את הסיכום בגוף ראשון", "עיניים ירוקות",
-                  "יש לי סקיל ל-PDF, תחבר אותו", "יש לי סקיל ניסוח, תשתמש בו"]
+                  "יש לי כבר סקיל PDF בקלוד קוד, תשתמש בו", "צור לי סקיל ניסוח בסגנון שלי"]
     }
     func load() {
         items = (loadConfig()["custom_instructions"] as? [String]) ?? []
@@ -2189,11 +2817,46 @@ final class TimmyChatModel: ObservableObject {
         return before == after ? nil : "המראה לפני: " + before + ". אחרי: " + after
     }
 
+    // 📎: דוגמאות כתיבה (PDF, Word, טקסט) או PDF שרוצים ממנו סקיל עיצוב
+    static let attachTypes: [UTType] = [.pdf, .plainText, .rtf, .html] + ["docx", "doc", "md", "markdown", "odt"].compactMap { UTType(filenameExtension: $0) }
+    func attach() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = Self.attachTypes
+        p.allowsMultipleSelection = true; p.canChooseDirectories = false
+        p.message = "צרף קבצים: דוגמאות של איך שאתה כותב (הודעות, מיילים, מסמכים), או PDF שאתה אוהב את העיצוב שלו"
+        p.prompt = "צרף"
+        NSApp.activate(ignoringOtherApps: true)
+        if p.runModal() == .OK { addAttachments(p.urls) }
+    }
+    func addAttachments(_ urls: [URL]) {
+        let ok = ["pdf", "txt", "text", "md", "markdown", "rtf", "docx", "doc", "odt", "html", "htm"]
+        let good = urls.filter { ok.contains($0.pathExtension.lowercased()) }
+        for u in good where !attachments.contains(u) { attachments.append(u) }
+        if good.count < urls.count { say("אפשר לצרף PDF, Word, טקסט או Markdown. את השאר דילגתי.", error: true) }
+    }
+    // כל הקבצים שצורפו בשיחה (מהישן לחדש), לפי השם שלהם
+    var attachedFiles: [URL] {
+        var out: [URL] = []
+        for m in msgs { for f in m.files ?? [] where !out.contains(where: { $0.path == f }) { out.append(URL(fileURLWithPath: f)) } }
+        return out
+    }
+
     func send(_ text: String? = nil) {
         let t = (text ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
-        if text == nil { input = "" }
+        let files = text == nil && !design ? attachments : []
+        guard !t.isEmpty || !files.isEmpty else { return }
+        if busy != nil && !files.isEmpty {   // הקבצים נשארים מצורפים עד שטימי מסיים
+            if !(msgs.last.map { !$0.fromUser && $0.text.hasPrefix("רגע, אני עוד") } ?? false) { say("רגע, אני עוד באמצע. הקבצים נשארים מצורפים, ותשלח אותם שוב כשאסיים.") }
+            return
+        }
+        if text == nil { input = ""; attachments = [] }
         if busy != nil { queue.append(t); return }
+        if !files.isEmpty {
+            let names = files.map { "📎 \u{2066}" + $0.lastPathComponent + "\u{2069}" }.joined(separator: "\n")
+            msgs.append(ChatMsg(fromUser: true, text: t.isEmpty ? "צירפתי:\n" + names : t + "\n" + names, files: files.map(\.path))); save()
+            askClaude(t.isEmpty ? "צירפתי קבצים: " + files.map(\.lastPathComponent).joined(separator: ", ") : t)
+            return
+        }
         msgs.append(ChatMsg(fromUser: true, text: t)); save()
         // מסלול מהיר: הוראת מראה ברורה, בלי Claude
         let followUp = msgs.count > 2 && isFollowUp(t)
@@ -2225,16 +2888,32 @@ final class TimmyChatModel: ObservableObject {
             - {"type":"pdf_instruction","text":"..."} כל מה שקשור לקובץ ה-PDF ללקוח (לוגו, עיצוב המסמך, שם העסק, פרטי קשר בתחתית). הטקסט עובר לצ'אט אחר שלא רואה את השיחה הזאת, אז הוא חייב לעמוד בפני עצמו: קודם תפתור את ההקשר ואז תכתוב הוראה מלאה (לא "עוד יותר", אלא "הכותרות בכחול כהה יותר מעכשיו").
             - {"type":"apply_to_last_call"} רק אם המשתמש ביקש להחיל על השיחה האחרונה (גם "כן" לשאלה שלך אם להחיל).
             - {"type":"link_skill","purpose":"pdf" או "writing","skill":"<השם המדויק מרשימת הסקילים, או נתיב>"} לחבר סקיל של Claude שיש במחשב.
-              "pdf" = לעצב את ה-PDF ללקוח בדיוק כמו הסקיל. העיצוב מתחיל לבד בחלון "עיצוב ה-PDF" מיד אחרי החיבור, אז אל תוסיף על זה pdf_instruction. ב-reply רק תגיד איזה סקיל חיברת (על חלון העיצוב טימי מוסיף שורה לבד).
+              "pdf" = טימי משתמש בסקיל כמו שהוא: אם יש לסקיל סקריפט שמייצר PDF, כל ה-PDF-ים ללקוח ייצאו ממנו, בדיוק כמו בקלוד קוד. אם אין, טימי מעצב את התבנית שלו לפי הסקיל. זה קורה לבד בחלון "עיצוב ה-PDF" מיד אחרי החיבור, אז אל תוסיף על זה pdf_instruction. ב-reply רק תגיד איזה סקיל חיברת. אל תגיד לו לפתוח את חלון עיצוב ה-PDF: הוא נפתח לבד, וטימי מוסיף על זה שורה בעצמו.
+              "יש לי כבר סקיל PDF בקלוד קוד, תשתמש בו" = link_skill עם purpose "pdf" (לפי הכללים שלמטה: סקיל אחד מתאים מחברים, כמה מתאימים שואלים איזה).
               "writing" = לנסח לפיו כל טקסט שטימי מנסח עם Claude: הודעות וואטסאפ ותוכן ה-PDF ללקוח (לא הסיכומים ולא הנקודות).
               אם יותר מסקיל אחד ברשימה מתאים למה שתיאר, אל תחבר עדיין: תשאל ב-reply איזה מהם, עם 2 עד 4 שמות מדויקים ומה כל אחד עושה בכמה מילים. בהודעה הבאה ("הראשון", "זה של המדריכים", חלק מהשם) תבין לפי השיחה למי הוא התכוון ותחבר אותו.
               אם סקיל אחד מתאים בבירור, תחבר בלי לשאול. אף פעם אל תבקש נתיב או "שם מדויק" כשיש ברשימה סקילים שקשורים למה שתיאר (לפי השם או התיאור): תציע אותם בשמם. רק אם אין ברשימה שום סקיל קשור, תגיד בכנות שלא מצאת ותבקש את השם או את הנתיב לתיקייה. נתיב שהמשתמש כתב (מתחיל ב-/ או ~) מעבירים בדיוק כמו שהוא.
-            - {"type":"unlink_skill","purpose":"pdf" או "writing"} לנתק סקיל מחובר. ניתוק של סקיל ה-PDF לא משנה את העיצוב שכבר נעשה: ה-PDF נשאר מעוצב כמו עכשיו, ורק הבקשות הבאות לא ייעשו לפי הסקיל. אל תגיד שהעיצוב חוזר לברירת המחדל; מי שרוצה לחזור לעיצוב המקורי לוחץ "חזור לעיצוב המקורי" בחלון עיצוב ה-PDF.
+            - {"type":"create_pdf_skill","file":"<השם של קובץ PDF שצורף בשיחה, או ריק>"} ליצור סקיל עיצוב PDF חדש מ-PDF שהמשתמש אוהב את העיצוב שלו (מסמך מותג, הצעת מחיר ישנה). טימי לומד ממנו צבעים, פונטים ומבנה, שומר אותו כסקיל של Claude Code, מחבר אותו, ומעכשיו ה-PDF-ים יוצאים בעיצוב הזה.
+              אם צירף PDF בשיחה (ראה "קבצים שהמשתמש צירף"), תעביר את השם שלו. אם לא צירף, תשאיר ריק: טימי פותח לו מיד חלון לבחירת הקובץ.
+              ב-reply: אם צירף, תגיד שאתה מתחיל ושזה לוקח דקה או שתיים בחלון "עיצוב ה-PDF". אם לא צירף, תגיד רק שפתחת לו חלון לבחור את הקובץ, ושאחרי הבחירה זה לוקח דקה או שתיים. אל תשאל אם צירף ואל תבקש את שם הקובץ.
+            - {"type":"create_writing_skill","files":["<שמות קבצים שצורפו כדוגמאות כתיבה>"],"use_pasted":true/false,"samples":["<תחילת כל הודעה שהוא הדביק בשיחה כדוגמה, 4 עד 8 מילים מכל אחת, מילה במילה>"],"use_calls":true/false,"answers":"<סיכום מלא של מה שענה: טון, מילים שלא משתמש בהן, רשמיות, אימוג'י, חתימה, ותיקונים שביקש>","replace":true/false}
+              ליצור סקיל ניסוח חדש בקול של המשתמש, שטימי ינסח לפיו הודעות וואטסאפ ואת הטקסט ב-PDF.
+              התהליך: כשמבקשים סקיל ניסוח (ועוד לא שאלת), תשאל בהודעה אחת 2 עד 3 שאלות קצרות: איזה טון (קליל / ישיר / מכובד), מילים שהוא אף פעם לא משתמש בהן, אימוג'י וחתימה. ובאותה הודעה תבקש דוגמאות: לצרף קבצים עם 📎 (הודעות, מיילים, מסמכים), להדביק כאן כמה הודעות שכתב, ו/או לתת לך ללמוד מאיך שהוא מדבר בשיחות שהקלטת (תשאל אם מותר).
+              אחרי שענה (גם תשובה חלקית מספיקה) ויש לפחות מקור אחד (קובץ, טקסט שהדביק, או הסכמה לשיחות), תחזיר create_writing_skill בלי לשאול עוד. use_pasted=true אם הדביק בשיחה טקסט שהוא כתב. use_calls=true רק אם הסכים. ב-reply תגיד שאתה מתחיל ושזה לוקח כדקה.
+              אם כבר מחובר סקיל ניסוח (ראה "סקילים מחוברים"), תשאל קודם אם להחליף אותו, ורק אחרי שאישר תחזיר replace:true. אם הסקיל המחובר הוא כזה שטימי יצר בשיחה הזאת ועכשיו מבקשים לתקן בו משהו ("פחות רשמי", "בלי אימוג'י"), זה אישור: replace:true עם התיקון ב-answers.
+            - אתה כן יכול ליצור סקילים חדשים (עיצוב PDF וניסוח) ולהשתמש בסקיל PDF קיים כמו שהוא. אף פעם אל תגיד שאתה לא יכול ליצור סקיל.
+            - לכל מטרה (pdf / writing) מחובר סקיל אחד בלבד: חיבור חדש מחליף את הקודם, וכל ה-PDF-ים (או כל הניסוח) עוברים לסקיל החדש. כשמחליפים, תגיד את זה בפשטות ("החלפתי את X ב-Y"). אל תמציא חלוקה כמו "זה למדריכים וזה לשאר".
+            - {"type":"unlink_skill","purpose":"pdf" או "writing"} לנתק סקיל מחובר. מה קורה אחרי ניתוק של סקיל ה-PDF תלוי במצב (ראה "סקילים מחוברים"):
+              אם כתוב שהסקיל מייצר את ה-PDF בעצמו: מעכשיו ה-PDF-ים חוזרים לצאת בעיצוב של טימי (העיצוב שהיה לפני החיבור). תגיד את זה בפשטות.
+              אחרת (טימי רק עיצב את התבנית שלו לפי הסקיל): העיצוב שכבר נעשה נשאר, ורק הבקשות הבאות לא ייעשו לפי הסקיל. מי שרוצה לחזור לעיצוב המקורי לוחץ "חזור לעיצוב המקורי" בחלון עיצוב ה-PDF.
+            - {"type":"share_hiding","on":true/false} להסתיר את טימי (הבועה וכל החלונות) כשמשתפים מסך, למשל בגוגל מיט. עכשיו: \(hideInScreenShare ? "מוסתר בשיתוף מסך" : "רואים אותו בשיתוף מסך"). כשמוסתר, טימי גם לא מופיע בצילומי מסך. "תראה את טימי בשיתוף מסך" / "אני רוצה להדגים את טימי" = on:false.
             """
         return """
         אתה טימי, אפליקציית מק שמקליטה שיחות, רושמת נקודות בזמן אמת וכותבת סיכום. \(owner.isEmpty ? "המשתמש" : owner) כותב לך בצ'אט מה לשנות בך.
         החזר JSON בלבד בשורה אחת: {"reply": "...", "actions": [...]}
         reply: עברית בלבד (בלי מילים באנגלית, חוץ משמות של סקילים, קבצים או מוצרים), גוף ראשון בתור טימי, משפט או שניים, חם וטבעי. אומר בדיוק מה שינית, או שואל שאלת הבהרה אם לא ברור מה לעשות. בלי מקף ארוך.
+        עברית תקינה של דובר ילידי: עתיד בגוף ראשון הוא "אכתוב", "אלמד", "אצור", "אבנה" (לא "אני מכתוב", "אני ילמד", "שייצור"). בלי קודי צבע או מונחים טכניים ב-reply.
+        כינוי חייב להתאים במין ובמספר למה שהוא מחליף: על הודעות או דוגמאות (רבות, נקבה) "מהן", "אותן", "מכולן"; על קבצים או מסמכים "מהם"; על הודעה אחת "ממנה"; על קובץ אחד "ממנו". כשהכינוי מתייחס להודעות שהוא שולח, זה "מהן" ולא "ממנה". גם מספרים מתאימים במין: "שלושה דברים", "שלוש שאלות".
         actions: רק מה שהמשתמש ביקש. אם לא ברור גם אחרי שקראת את השיחה, רשימה ריקה ושאלה ב-reply.
 
         הכי חשוב: זו שיחה רציפה, לא הודעות בודדות. תבין את ההודעה החדשה לפי כל השיחה שלמטה.
@@ -2258,13 +2937,19 @@ final class TimmyChatModel: ObservableObject {
         \(mem)
         מה אני זוכר על המשתמש:
         \(memoryBlock())
-        \(design ? "" : skillsBlock(t))
+        \(design ? "" : skillsBlock(t))\(design ? "" : attachmentsBlock())
         השיחה עד עכשיו (הישנה למעלה, האחרונה למטה). מה שבסוגריים מרובעים [...] זה הערה פנימית בשבילך, אל תעתיק אותה ל-reply:
         \(history)
         ההודעה החדשה של המשתמש: "\(t)"
         """
     }
 
+    // קבצים שצורפו בשיחה (השמות), כדי שהבקשות "תעשה מזה סקיל" יובנו
+    func attachmentsBlock() -> String {
+        let f = attachedFiles
+        guard !f.isEmpty else { return "" }
+        return "\nקבצים שהמשתמש צירף בשיחה (מהישן לחדש): " + f.suffix(10).map(\.lastPathComponent).joined(separator: ", ")
+    }
     // הסקילים המחוברים, ורשימת הסקילים במחשב רק כשהשיחה מדברת על סקילים (כדי שהפרומפט יישאר קצר)
     func skillsBlock(_ t: String) -> String {
         let talk = ([t] + msgs.suffix(6).map(\.text)).contains { s in
@@ -2272,6 +2957,8 @@ final class TimmyChatModel: ObservableObject {
             return l.contains("סקיל") || l.contains("skill")
         }
         var out = "סקילים מחוברים: " + linkedSkillsLine()
+        if linkedSkill("pdf") != nil { out += skillRunsPDF() ? " (סקיל ה-PDF מייצר את ה-PDF בעצמו)" : " (טימי מעצב את התבנית שלו לפי סקיל ה-PDF)" }
+        if let w = linkedSkill("writing"), isTimmyMadeSkill(URL(fileURLWithPath: w.path)) { out += " (את סקיל הניסוח טימי יצר)" }
         let all = listClaudeSkills()
         if talk && !all.isEmpty {
             out += "\nהסקילים של Claude במחשב (שם: תיאור):\n" + skillCatalog(all)
@@ -2295,9 +2982,15 @@ final class TimmyChatModel: ObservableObject {
                 }
                 let before = self.lookState(), looksBefore = ["accent_color": Theme.accentHex, "eye_color": Theme.eyeHex, "background_color": Theme.bgHex]
                 let actions = (o["actions"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
-                let res = self.apply(actions, userText: t, replyText: (o["reply"] as? String) ?? "")
+                var rawReply = (o["reply"] as? String) ?? ""
+                // חיבור סקיל PDF: חלון "עיצוב ה-PDF" נפתח לבד, אז משפט כמו "תפתח את חלון עיצוב ה-PDF" לא נכון (טימי מוסיף שורה מדויקת)
+                if !self.design, actions.contains(where: { ($0["type"] as? String) == "link_skill" && (($0["purpose"] as? String) ?? "").lowercased() == "pdf" }) {
+                    let cleaned = self.dropOpenWindowHint(rawReply)
+                    if !cleaned.isEmpty { rawReply = cleaned }
+                }
+                let res = self.apply(actions, userText: t, replyText: rawReply)
                 let (restyle, learned) = (res.restyle, res.note)
-                var reply = ((o["reply"] as? String) ?? "").replacingOccurrences(of: "—", with: "-")
+                var reply = rawReply.replacingOccurrences(of: "—", with: "-")
                     .replacingOccurrences(of: "\\s*\\[(המראה לפני|סקיל)[^\\]]*\\]", with: "", options: .regularExpression)   // הערה פנימית שהועתקה בטעות
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if let honest = res.honest { reply = honest }   // Claude אמר "חיברתי" אבל הסקיל לא נמצא: אומרים את האמת
@@ -2320,17 +3013,31 @@ final class TimmyChatModel: ObservableObject {
                 if let n = changedLooks.flatMap(contrastNote), !["קריא", "כהה יותר", "בהיר יותר", "בהירות יותר"].contains(where: { reply.contains($0) }) { reply += " " + n }
                 let ctx = [self.looksCtx(before), res.ctx].compactMap { $0 }.joined(separator: ". ")
                 self.say(reply, ctx: ctx.isEmpty ? nil : ctx)
-                if restyle { self.restyleLast() } else { self.next() }
+                if let w = res.writing { self.startWritingSkill(w, replacing: res.replacing) }
+                else if restyle { self.restyleLast() } else { self.next() }
             }
         }
     }
+    // מוחק משפטים שמבקשים מהמשתמש לפתוח את חלון עיצוב ה-PDF (הוא נפתח לבד אחרי חיבור סקיל)
+    func dropOpenWindowHint(_ s: String) -> String {
+        let opens = ["תפתח", "לפתוח", "פתח את", "תיכנס", "להיכנס", "היכנס", "תלחץ", "ללחוץ", "תעבור ל", "לעבור ל", "תציץ", "להציץ"]
+        let re = try! NSRegularExpression(pattern: "[^.!?]+[.!?]*\\s*")
+        return s.components(separatedBy: "\n").map { line -> String in
+            let ns = line as NSString
+            return re.matches(in: line, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range) }
+                .filter { sen in !(opens.contains { sen.contains($0) } && (sen.contains("חלון") || sen.contains("עיצוב ה-PDF"))) }
+                .joined()
+        }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     // מחיל את הפעולות שטימי החליט עליהן. מחזיר: האם להחיל על השיחה האחרונה, ושורה על מה שנשמר/נמחק בזיכרון
-    struct Applied { var restyle = false, note = "", honest: String? = nil, ctx: String? = nil, linked: [(String, SkillInfo)] = [], looks: [String: Any]? = nil }
+    struct Applied { var restyle = false, note = "", honest: String? = nil, ctx: String? = nil, linked: [(String, SkillInfo)] = [], looks: [String: Any]? = nil
+        var writing: WritingSources? = nil, replacing: URL? = nil }
     private func apply(_ actions: [[String: Any]], userText: String, replyText: String = "") -> Applied {
         var looks: [String: Any] = [:], changed = false, restyle = false, pdfText: String?
         var learned: [String] = [], forgot: [String] = []
         var linked: [(String, SkillInfo)] = [], unlinked: [String] = [], problems: [String] = []
         var catalog: [SkillInfo]?
+        var writing: WritingSources?, replacing: URL?, makePDFSkill: URL?, makePDFSkillAsked = false, shareNote: String?
         for a in actions {
             let text = ((a["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             switch a["type"] as? String ?? "" {
@@ -2359,9 +3066,41 @@ final class TimmyChatModel: ObservableObject {
                 if found.count == 1 { setLinkedSkill(purpose, found[0]); linked.append((purpose, found[0])) }
                 else if found.isEmpty { problems.append("לא מצאתי במחשב סקיל בשם \(q). תכתוב לי את השם המדויק שלו, או את הנתיב לתיקייה שלו (זו שיש בה SKILL.md).") }
                 else { problems.append("יש כמה סקילים שמתאימים ל-\(q): " + found.prefix(4).map(\.name).joined(separator: ", ") + ". איזה מהם לחבר ל\(skillPurposeName(purpose))?") }
+            case "share_hiding" where !design:
+                if let on = a["on"] as? Bool, on != hideInScreenShare { setHideInScreenShare(on); shareNote = on ? "מעכשיו מי שצופה בשיתוף המסך שלך לא יראה את טימי." : "מעכשיו רואים את טימי בשיתוף מסך." }
             case "unlink_skill" where !design:
                 let purpose = ((a["purpose"] as? String) ?? "").lowercased()
                 if linkedSkill(purpose) != nil { setLinkedSkill(purpose, nil); unlinked.append(purpose) }
+            case "create_pdf_skill" where !design:
+                let name = ((a["file"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let pdfs = attachedFiles.filter { $0.pathExtension.lowercased() == "pdf" }
+                // השם שצוין, ואם אין: PDF שצורף ממש עכשיו (בהודעות האחרונות). אחרת חלון בחירת קובץ
+                let recent = Set(msgs.suffix(4).flatMap { $0.files ?? [] })
+                makePDFSkill = (name.isEmpty ? nil : pdfs.last { $0.lastPathComponent == name || $0.lastPathComponent.localizedCaseInsensitiveContains(name) })
+                    ?? pdfs.last { recent.contains($0.path) } ?? (name.isEmpty ? nil : pdfs.last)
+                makePDFSkillAsked = true
+            case "create_writing_skill" where !design:
+                var src = WritingSources()
+                let names = ((a["files"] as? [Any]) ?? []).compactMap { $0 as? String }
+                let all = attachedFiles
+                src.files = names.isEmpty ? Array(all.suffix(8)) : all.filter { f in names.contains { f.lastPathComponent == $0 || f.lastPathComponent.localizedCaseInsensitiveContains($0) } }
+                if src.files.isEmpty && !names.isEmpty { src.files = Array(all.suffix(8)) }
+                // טקסט שהמשתמש הדביק (המלא, לא המקוצר שבפרומפט): הודעות וואטסאפ קצרות שהודבקו אחת אחת נחשבות גם
+                if (a["use_pasted"] as? Bool) != false {
+                    src.pasted = pastedWritingSamples(Array(msgs.suffix(30)), hinted: ((a["samples"] as? [Any]) ?? []).compactMap { $0 as? String })
+                }
+                src.useCalls = (a["use_calls"] as? Bool) == true
+                src.answers = ((a["answers"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                src.history = chatHistory(msgs.suffix(24))
+                if let w = linkedSkill("writing") {
+                    let old = URL(fileURLWithPath: w.path)
+                    if (a["replace"] as? Bool) != true {
+                        problems.append("כבר מחובר אצלי סקיל ניסוח (\u{2066}\(w.name)\u{2069}). להחליף אותו בסקיל חדש בסגנון שלך?")
+                        break
+                    }
+                    if isTimmyMadeSkill(old) { replacing = old; src.previous = skillMarkdown(old, maxTotal: 12000) }
+                }
+                writing = src
             default: break
             }
         }
@@ -2369,25 +3108,65 @@ final class TimmyChatModel: ObservableObject {
         if changed { saveItems() }
         if !learned.isEmpty || !forgot.isEmpty { memory = loadMemory() }
         if !linked.isEmpty || !unlinked.isEmpty { loadSkills() }
-        // סקיל PDF חדש: פותחים את "עיצוב ה-PDF" ומבקשים לעצב בדיוק כמוהו
+        var ctx_extra: [String] = []
+        // סקיל PDF חדש: "עיצוב ה-PDF" נפתח ומשתמש בו (הסקריפט שלו אם יש, אחרת עיצוב התבנית לפיו)
         if let s = linked.last(where: { $0.0 == "pdf" })?.1 {
-            let req = "תעצב את ה-PDF בדיוק כמו בסקיל \(s.name)" + (pdfText.map { ". וגם: " + $0 } ?? "")
-            pdfText = req
+            let extra = pdfText
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: nil, adopt: s, then: extra) }
+        } else if let p = pdfText { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: p) } }
+        // סקיל עיצוב מ-PDF: נוצר בחלון "עיצוב ה-PDF" (שם רואים את ההתקדמות ואת התוצאה)
+        if makePDFSkillAsked {
+            let f = makePDFSkill
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: nil, createSkillFrom: f, pick: f == nil) }
         }
-        if let p = pdfText { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: p) } }
         var note: [String] = []
         if !learned.isEmpty { note.append("זכרתי: " + learned.joined(separator: " · ")) }
         if !forgot.isEmpty { note.append("שכחתי: " + forgot.joined(separator: " · ")) }
         if !unlinked.isEmpty && !replyText.contains("ניתקתי") { note.append("ניתקתי את הסקיל של " + unlinked.map(skillPurposeName).joined(separator: " ושל ") + ".") }
-        if linked.contains(where: { $0.0 == "pdf" }) { note.append("אני מעצב עכשיו את ה-PDF לפי הסקיל בחלון \"עיצוב ה-PDF\". זה לוקח כדקה או שתיים.") }
+        // שורה על חלון העיצוב רק אם התשובה לא כבר אמרה את זה (אחרת שתי הודעות חופפות, בזמנים שונים)
+        // ("לעיצוב ה-PDF" לבד הוא שם המטרה של הסקיל, לא אומר שהחלון נפתח)
+        if linked.contains(where: { $0.0 == "pdf" }), !["חלון", "נפתח", "ייפתח", "פתחתי"].contains(where: { replyText.contains($0) }) {
+            note.append("פתחתי את \"עיצוב ה-PDF\": אני בודק שם איך הסקיל מייצר PDF, ותראה שם איך סיכום שיחה נראה בו.")
+        }
+        if let n = shareNote, !["שיתוף", "שתף", "גלוי", "מוסתר", "להסתיר", "יראו", "רואים", "יראה", "יופיע", "מופיע"].contains(where: { replyText.contains($0) }) { note.append(n) }
+        if makePDFSkillAsked { ctx_extra.append("סקיל: התחלתי ליצור סקיל עיצוב מ-" + (makePDFSkill?.lastPathComponent ?? "PDF שהמשתמש יבחר") + " בחלון עיצוב ה-PDF") }
         // הערה נסתרת להמשך השיחה
-        var ctx: [String] = linked.map { "סקיל: חיברתי את \($0.1.name) ל\(skillPurposeName($0.0))" }
+        var ctx: [String] = linked.map { "סקיל: חיברתי את \($0.1.name) ל\(skillPurposeName($0.0))" } + ctx_extra
         ctx += unlinked.map { "סקיל: ניתקתי את הסקיל של \(skillPurposeName($0))" }
         // אם לא חיברנו כלום אבל Claude ביקש לחבר: התשובה שלו ("חיברתי") לא נכונה
         let honest: String? = problems.isEmpty ? nil : (linked.isEmpty ? problems.joined(separator: "\n") : nil)
         if linked.isEmpty && !problems.isEmpty { ctx.append("סקיל: לא חיברתי, " + problems.joined(separator: " ")) }
         if !linked.isEmpty && !problems.isEmpty { note.append(contentsOf: problems) }
-        return Applied(restyle: restyle, note: note.joined(separator: "\n"), honest: honest, ctx: ctx.isEmpty ? nil : ctx.joined(separator: ". "), linked: linked, looks: looks.isEmpty ? nil : looks)
+        return Applied(restyle: restyle, note: note.joined(separator: "\n"), honest: honest, ctx: ctx.isEmpty ? nil : ctx.joined(separator: ". "), linked: linked, looks: looks.isEmpty ? nil : looks,
+                       writing: writing, replacing: replacing)
+    }
+    // סקיל ניסוח חדש: רץ ברקע עם התקדמות וכפתור "בטל", ומתחבר לניסוח בסוף
+    func startWritingSkill(_ src: WritingSources, replacing: URL?) {
+        let token = CancelToken()
+        busy = "קורא את הדוגמאות שלך…"
+        cancelAction = { [weak self] in token.cancel(); self?.busy = "מבטל…" }
+        DispatchQueue.global().async {
+            let res = createWritingSkill(src, replacing: replacing, token: token) { m in DispatchQueue.main.async { if !token.isCancelled { self.busy = m } } }
+            DispatchQueue.main.async {
+                self.cancelAction = nil; self.busy = nil
+                switch res {
+                case .cancelled:
+                    self.say("ביטלתי. לא נוצר סקיל, והניסוח נשאר כמו שהיה.", ctx: "סקיל: יצירת סקיל הניסוח בוטלה")
+                    demoFinished(["flow": "writing-skill", "ok": false, "cancelled": true])
+                case .failed(let why):
+                    self.say(why, error: true, ctx: "סקיל: לא יצרתי סקיל ניסוח")
+                    demoFinished(["flow": "writing-skill", "ok": false, "error": why])
+                case .ok(let info, let summary):
+                    setLinkedSkill("writing", info); self.loadSkills()
+                    let text = (summary.isEmpty ? "" : summary + "\n\n")
+                        + "שמרתי את זה כסקיל ניסוח בשם \u{2066}\(info.name)\u{2069} (גם Claude Code יכול להשתמש בו) וחיברתי אותו. מעכשיו הודעות הוואטסאפ והטקסט ב-PDF ללקוח ינוסחו בקול שלך."
+                        + "\nאם משהו לא מרגיש כמוך, תגיד לי מה, ואכתוב אותו מחדש."
+                    self.say(text, ctx: "סקיל: יצרתי סקיל ניסוח \(info.name) וחיברתי אותו לניסוח" + (replacing != nil ? " (הקודם עבר לפח)" : ""))
+                    demoFinished(["flow": "writing-skill", "ok": true, "skill": info.name, "path": info.dir.path])
+                }
+                self.next()
+            }
+        }
     }
     // מחיל את ההוראות על הסיכום האחרון (live.py --restyle)
     private func restyleLast() {
@@ -2442,6 +3221,11 @@ struct TimmyChatView: View {
         .environment(\.layoutDirection, .rightToLeft)
         .environment(\.colorScheme, themeScheme)
         .onAppear { m.load() }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard !m.design else { return false }
+            loadDroppedURLs(providers) { m.addAttachments($0) }
+            return true
+        }
     }
 }
 struct TimmyChatHeader: View {
@@ -2470,7 +3254,7 @@ struct TimmyChatScroll: View {
                         ChatBubble(msg: msg)
                         if i == 0 { FlowChips(items: m.suggestions) { m.send($0) }.padding(.leading, 38) }
                     }
-                    if let b = m.busy { TypingBubble(text: b) }
+                    if let b = m.busy { TypingBubble(text: b, cancel: m.cancelAction) }
                     Color.clear.frame(height: 1).id("end")
                 }
                 .padding(.vertical, 6)
@@ -2485,7 +3269,34 @@ struct TimmyChatScroll: View {
 struct TimmyChatInput: View {
     @ObservedObject var m: TimmyChatModel
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !m.attachments.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(m.attachments, id: \.self) { u in
+                        HStack(spacing: 5) {
+                            Image(systemName: "doc").font(.system(size: 10, weight: .semibold)).foregroundColor(amber)
+                            Text(u.lastPathComponent).font(.system(size: 11.5)).foregroundColor(ink.opacity(0.85)).lineLimit(1).truncationMode(.middle)
+                                .environment(\.layoutDirection, .leftToRight)
+                            Button(action: { m.attachments.removeAll { $0 == u } }) {
+                                Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold)).foregroundColor(ink.opacity(0.5))
+                            }.buttonStyle(.plain).help("להסיר")
+                        }
+                        .padding(.vertical, 4).padding(.horizontal, 9).background(Capsule().fill(amber.opacity(0.14)))
+                        .frame(maxWidth: 210)
+                    }
+                    Spacer()
+                }
+            }
+            inputRow
+        }
+    }
+    var inputRow: some View {
         HStack(spacing: 8) {
+            if !m.design {
+                Button(action: { m.attach() }) {
+                    Text("📎").font(.system(size: 16)).frame(width: 38, height: 38).background(Circle().fill(ink.opacity(0.08)))
+                }.buttonStyle(.plain).help("צרף קבצים: דוגמאות של איך שאתה כותב, או PDF שאתה אוהב את העיצוב שלו")
+            }
             RTLField(placeholder: m.design ? "למשל: עיניים ירוקות, רקע כחול כהה" : "תכתוב לטימי מה לשנות…", text: $m.input, onSubmit: { m.send() })
                 .padding(.vertical, 10).padding(.horizontal, 14)
                 .background(RoundedRectangle(cornerRadius: 19).fill(ink.opacity(0.08)))
@@ -2544,7 +3355,27 @@ struct MemoryList: View {
             ForEach(skillPurposes.filter { m.skills[$0.0] != nil }, id: \.0) { p in
                 MemoryRow(text: p.1 + ": \u{2066}" + (m.skills[p.0] ?? "") + "\u{2069}", icon: "wand.and.stars") { m.unlinkSkill(p.0) }   // שם לטיני מבודד, שלא יתערבב עם העברית
             }
+            SkillActionsRow(m: m).padding(.top, 2)
         }
+    }
+}
+// יצירת סקילים / שימוש בסקיל PDF קיים, מתוך "סקילים מחוברים"
+struct SkillActionsRow: View {
+    @ObservedObject var m: TimmyChatModel
+    var body: some View {
+        HStack(spacing: 6) {
+            SmallChip(title: m.skills["writing"] == nil ? "צור סקיל ניסוח בסגנון שלי" : "צור סקיל ניסוח חדש", icon: "text.quote") {
+                m.send("אני רוצה ליצור סקיל ניסוח בסגנון שלי")
+            }.help("טימי ישאל כמה שאלות, ילמד מדוגמאות שלך ויכתוב סקיל שמנסח בקול שלך")
+            SmallChip(title: "צור סקיל PDF מקובץ", icon: "doc.badge.plus") {
+                (NSApp.delegate as? AppDelegate)?.openPDFDesign(send: nil, pick: true)
+            }.help("בחר PDF שאתה אוהב את העיצוב שלו, וטימי יבנה ממנו סקיל עיצוב")
+            SmallChip(title: "יש לי כבר סקיל PDF", icon: "wand.and.stars") {
+                m.send("יש לי כבר סקיל PDF בקלוד קוד, פשוט תשתמש בו")
+            }.help("טימי ימצא את הסקיל במחשב וישתמש בו כמו שהוא")
+            Spacer(minLength: 0)
+        }
+        .disabled(m.busy != nil).opacity(m.busy != nil ? 0.5 : 1)
     }
 }
 struct MemoryHeader: View {
@@ -2663,8 +3494,25 @@ final class Onboarding: ObservableObject {
     @Published var folder = recDir.path
     @Published var freeGB: Double = 0
     @Published var launchAtLogin = false
-    enum ClaudeState { case unknown, checking, ok, notInstalled, notLoggedIn }
+    @Published var hideInShare = hideInScreenShare
+    // מצב החיבור ל-Claude Code. problem = מחובר לחשבון (או לא ידוע), אבל Claude לא ענה בבדיקה (אינטרנט, מכסה, זמן)
+    // loggingIn = "התחבר" נלחץ, מחכים לאישור בדפדפן. אין שום מעבר לטרמינל: ההתחברות רק מתוך טימי, בדפדפן
+    enum ClaudeState: Equatable { case unknown, checking, ok, notInstalled, notLoggedIn, loggingIn, problem(String) }
     @Published var claude: ClaudeState = .unknown
+    @Published var claudeNote = ""        // שורת הסבר נוספת (למשל "החיבור לחשבון פג")
+    @Published var claudeHealth = false   // בדיקת התשובה של Claude רצה ברקע
+    @Published var loginURL: URL?         // הקישור להתחברות (גיבוי, אם הדפדפן לא נפתח לבד)
+    @Published var loginNeedsCode = false // הדפדפן מציג קוד להדבקה (גרסאות שלא חוזרות לבד)
+    @Published var loginError = ""
+    @Published var loginCodeHint = ""     // הקוד שהודבק לא שלם (Claude Code מחכה להדבקה נוספת)
+    @Published var loginOutdated = false  // Claude Code ישן מדי ואין בו "auth login": צריך גרסה חדשה (דרך אפליקציית Claude)
+    var outdatedCands: [String] = []      // ההתקנות שהיו כשזה קרה: כשמשהו משתנה (גרסה חדשה), בודקים שוב לבד
+    @Published var claudeFromDesktop = false   // Claude Code שבתוך אפליקציית Claude
+    var checkGen = 0, loginGen = 0
+    var loginDoneAt = Date.distantPast    // מתי ההתחברות האחרונה הסתיימה בהצלחה
+    var lastCodeMode = false              // הניסיון האחרון היה עם קוד: "נסה שוב" חוזר לאותה דרך
+    var loginProc: Process?
+    var loginInput: FileHandle?
     private var timer: Timer?
     static weak var shared: Onboarding?
     init() {
@@ -2687,42 +3535,216 @@ final class Onboarding: ObservableObject {
         if g != freeGB { freeGB = g }
         let l = SMAppService.mainApp.status == .enabled
         if l != launchAtLogin { launchAtLogin = l }
-    }
-    // Claude Code: איפה הוא מותקן
-    func claudePath() -> String? { findClaudePath() }
-    // בדיקה אמיתית: שאלה קטנה ל-Claude. מצליח = מחובר לחשבון
-    func checkClaude() {
-        guard let path = claudePath() else { claude = .notInstalled; return }
-        saveConfig(["claude_path": path])
-        claude = .checking
-        DispatchQueue.global().async {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: path)
-            p.arguments = ["-p", "--model", "haiku", "ענה במילה אחת בלבד: מחובר"]
-            p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
-            var env = ProcessInfo.processInfo.environment
-            env["PATH"] = (path as NSString).deletingLastPathComponent + ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
-            p.environment = env
-            let out = Pipe(); p.standardOutput = out; p.standardError = Pipe(); p.standardInput = FileHandle.nullDevice
-            var ok = false
-            if (try? p.run()) != nil {
-                let deadline = Date().addingTimeInterval(45)
-                while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
-                if p.isRunning { p.terminate() }
-                else {
-                    let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    ok = p.terminationStatus == 0 && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                }
-            }
-            DispatchQueue.main.async { self.claude = ok ? .ok : .notLoggedIn }
+        // מחכים שיתקין את Claude Code (או שיפתח את הלשונית Code באפליקציית Claude): בודקים שוב לבד כשהוא מופיע
+        if step == 4 && claude == .notInstalled && ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE"] == nil {
+            tick += 1
+            if tick % 4 == 0 && !claudeCandidatePaths().isEmpty { checkClaude() }
+        }
+        // Claude Code ישן מדי: מחכים שתגיע גרסה חדשה (הלשונית Code באפליקציית Claude מביאה אותה) ובודקים שוב לבד
+        if step == 4 && claude == .notLoggedIn && loginOutdated && ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE"] == nil {
+            tick += 1
+            if tick % 4 == 0 && claudeCandidatePaths() != outdatedCands { checkClaude() }
         }
     }
-    // פותח טרמינל עם claude, כדי שהמשתמש יתחבר לחשבון
-    func openClaudeLogin() {
-        guard let path = claudePath() else { return }
-        let script = "tell application \"Terminal\"\nactivate\ndo script \"'\(path)'\"\nend tell"
-        NSAppleScript(source: script)?.executeAndReturnError(nil)
+    private var tick = 0
+    // Claude Code: איפה הוא מותקן
+    func claudePath() -> String? { findClaudePath() }
+
+    // בדיקת החיבור: קודם "claude auth status" (מהיר, בלי לשאול את המודל) בכל ההתקנות שנמצאו,
+    // ואז ברקע שאלה קטנה ל-Claude רק כדי לוודא שהוא באמת עונה (אינטרנט, מכסה). הבדיקה הזו לא קובעת לבד אם מחוברים
+    func checkClaude() {
+        if claude == .loggingIn { return }
+        if applyDemoClaude() { return }
+        checkGen += 1; let gen = checkGen
+        claude = .checking; claudeNote = ""; claudeHealth = false; loginError = ""; loginOutdated = false
+        DispatchQueue.global().async {
+            let d = detectClaude()
+            DispatchQueue.main.async {
+                guard gen == self.checkGen, self.claude == .checking else { return }
+                self.claudeFromDesktop = d.path.map(isDesktopClaude) ?? false
+                self.claude = d.state; self.claudeNote = d.note
+                if d.state == .ok, let p = d.path { self.runHealth(p, gen: gen) }
+            }
+        }
+    }
+    // שאלה קטנה ל-Claude (אחרי שכבר ידוע שמחוברים). נכשל: מסבירים למה, אבל אפשר להמשיך
+    func runHealth(_ path: String, gen: Int) {
+        claudeHealth = true
+        DispatchQueue.global().async {
+            let h = claudeHealthCheck(path)
+            DispatchQueue.main.async {
+                guard gen == self.checkGen else { return }
+                self.claudeHealth = false
+                guard self.claude == .ok else { return }
+                switch h {
+                case .ok: break
+                case .auth:
+                    self.claude = .notLoggedIn; self.claudeNote = "החיבור לחשבון פג. צריך להתחבר שוב (לוקח דקה)."
+                    // ממש עכשיו התחבר, ו-Claude עדיין לא מקבל את החשבון: מציעים לנסות שוב או את הדרך עם הקוד
+                    if Date().timeIntervalSince(self.loginDoneAt) < 120 {
+                        self.loginError = "ההתחברות הסתיימה, אבל Claude עדיין לא מקבל את החשבון. נסה שוב, או התחבר עם קוד."
+                    }
+                case .failed(let msg): self.claude = .problem(msg)
+                }
+            }
+        }
+    }
+    // TIMMY_DEMO_CLAUDE: מצב קבוע לצילומי מסך, בלי להריץ כלום
+    func applyDemoClaude() -> Bool {
+        guard let st = ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE"], !st.isEmpty else { return false }
+        claudeNote = ""; loginError = ""; loginURL = nil; loginOutdated = false; loginNeedsCode = false
+        claudeFromDesktop = (ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE_DESKTOP"] ?? "0") != "0"
+        switch st {
+        case "missing": claude = .notInstalled
+        case "ok": claude = .ok
+        case "checking": claude = .checking
+        case "expired": claude = .notLoggedIn; claudeNote = "החיבור לחשבון פג. צריך להתחבר שוב (לוקח דקה)."
+        case "login-error": claude = .notLoggedIn; loginError = loginFailureText(.other)
+        case "login-timeout": claude = .notLoggedIn; loginError = loginFailureText(.timeout)
+        case "login-badcode": claude = .notLoggedIn; loginError = loginFailureText(.badCode)
+        case "outdated": claude = .notLoggedIn; loginOutdated = true; loginError = loginFailureText(.outdated)
+        case "waiting": claude = .loggingIn; loginURL = URL(string: "https://claude.com/cai/oauth/authorize?demo=1")
+        case "waiting-code": claude = .loggingIn; loginNeedsCode = true; loginURL = URL(string: "https://claude.com/cai/oauth/authorize?demo=1")
+        case "network": claude = .problem(claudeProblemText(.network))
+        case "timeout": claude = .problem(claudeProblemText(.timeout))
+        case "limit": claude = .problem(claudeProblemText(.limit))
+        default: claude = .notLoggedIn
+        }
+        return true
     }
 
+    // "התחבר": מריצים "claude auth login" מתוך טימי, ברקע. הוא פותח את הדפדפן לאישור, ואנחנו מחכים
+    // עד שהוא מסיים (או ש-"auth status" עובר ל"מחובר"), ואז ממשיכים לבד. אף פעם לא פותחים טרמינל.
+    // codeMode = הדרך החלופית: הדף בדפדפן מציג קוד, והמשתמש מדביק אותו כאן (כשהדפדפן לא חוזר לטימי לבד)
+    func startClaudeLogin(codeMode: Bool = false) { startLogin(codeMode: codeMode, args: ["auth", "login", "--claudeai"]) }
+    private func startLogin(codeMode: Bool, args: [String]) {
+        if claude == .loggingIn { return }
+        guard let path = claudePath() else { claude = .notInstalled; return }
+        checkGen += 1; loginGen += 1; let gen = loginGen
+        claude = .loggingIn; loginURL = nil; loginError = ""; claudeNote = ""; loginNeedsCode = codeMode; loginOutdated = false; loginCodeHint = ""
+        lastCodeMode = codeMode
+        // הדפדפן נפתח דרך BROWSER: סקריפט קטן שרושם לנו את הקישור, וטימי פותח אותו (וגם מציג אותו כגיבוי)
+        let urlFile = appDir.appendingPathComponent("claude-login-url.txt")
+        let helper = appDir.appendingPathComponent("claude-login-browser.sh")
+        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: urlFile)
+        try? "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$TIMMY_LOGIN_URL_FILE\"\n".write(to: helper, atomically: true, encoding: .utf8)
+        chmod(helper.path, 0o755)
+        let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
+        p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = (path as NSString).deletingLastPathComponent + ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+        env["BROWSER"] = helper.path; env["TIMMY_LOGIN_URL_FILE"] = urlFile.path
+        p.environment = env
+        let out = Pipe(), inp = Pipe()
+        noSigPipe(inp)
+        p.standardOutput = out; p.standardError = out; p.standardInput = inp
+        let buf = LockedText()
+        out.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            if d.isEmpty { h.readabilityHandler = nil } else { buf.append(String(decoding: d, as: UTF8.self)) }
+        }
+        do { try p.run() } catch {
+            out.fileHandleForReading.readabilityHandler = nil
+            claude = .notLoggedIn; loginError = "לא הצלחתי להפעיל את Claude Code. נסה \"בדוק שוב\", ואם זה חוזר, התקן אותו מחדש."
+            return
+        }
+        // טימי נסגר בכל דרך (גם כשהמתקין סוגר אותו, Force Quit או קריסה): ההתחברות לא נשארת לרוץ לבד ברקע
+        watchChild(p.processIdentifier)
+        loginProc = p; loginInput = inp.fileHandleForWriting
+        let timeout = Double(ProcessInfo.processInfo.environment["TIMMY_CLAUDE_LOGIN_TIMEOUT"] ?? "") ?? 300
+        DispatchQueue.global().async {
+            let start = Date()
+            // "auth status" כבר אמר "מחובר" לפני ההתחברות (החיבור פג או בוטל, ורק Claude עצמו יודע): לא סומכים עליו,
+            // ומחכים שההתחברות עצמה תסתיים בהצלחה
+            let wasLoggedIn = claudeAuthStatus(path, timeout: 5).loggedIn == true
+            var shown = false, lastPoll = Date(), partialSeen = 0
+            func finish(_ ok: Bool, _ fail: LoginFailure?) {
+                if p.isRunning { p.terminate() }
+                out.fileHandleForReading.readabilityHandler = nil
+                DispatchQueue.main.async {
+                    guard gen == self.loginGen else { return }
+                    self.loginProc = nil; self.loginInput = nil; self.loginURL = nil; self.loginNeedsCode = false; self.loginCodeHint = ""
+                    if ok { self.loginSucceeded(path); return }
+                    let f = fail ?? .other
+                    // גרסה שלא מכירה את "--claudeai" (אם ישנו אותו בעתיד): מנסים פעם אחת בלי
+                    if f == .flagRejected && args.contains("--claudeai") {
+                        self.claude = .notLoggedIn
+                        self.startLogin(codeMode: codeMode, args: ["auth", "login"]); return
+                    }
+                    self.claude = .notLoggedIn
+                    if f == .outdated || f == .flagRejected { self.loginOutdated = true; self.outdatedCands = claudeCandidatePaths() }
+                    self.loginError = loginFailureText(f == .flagRejected ? .outdated : f)
+                }
+            }
+            while true {
+                Thread.sleep(forTimeInterval: 0.4)
+                if gen != self.loginGen { if p.isRunning { p.terminate() }; out.fileHandleForReading.readabilityHandler = nil; return }   // בוטל
+                // הקישור: מה-BROWSER (חוזר לטימי לבד), ואם הוא לא הגיע תוך כמה שניות, מהטקסט (שם מקבלים קוד להדבקה).
+                // בדרך החלופית (קוד) לוקחים מיד את הקישור מהטקסט
+                if !shown {
+                    var link: URL?, code = codeMode
+                    if !codeMode, let s = try? String(contentsOf: urlFile, encoding: .utf8), let u = URL(string: s.trimmingCharacters(in: .whitespacesAndNewlines)), u.scheme == "https" { link = u }
+                    else if codeMode || Date().timeIntervalSince(start) > 6, let s = firstURL(in: buf.text) { link = s; code = true }
+                    if let link {
+                        shown = true
+                        DispatchQueue.main.async {
+                            guard gen == self.loginGen else { return }
+                            self.loginURL = link; self.loginNeedsCode = code; openExternal(link)
+                        }
+                    }
+                }
+                // קוד חלקי (בלי החלק שאחרי ה-#): Claude Code לא יוצא, אלא מחכה להדבקה נוספת. מראים מיד מה לעשות
+                let partial = buf.text.lowercased().components(separatedBy: "look like the full code").count - 1
+                if partial > partialSeen {
+                    partialSeen = partial
+                    DispatchQueue.main.async {
+                        guard gen == self.loginGen else { return }
+                        self.loginNeedsCode = true
+                        self.loginCodeHint = "הקוד לא שלם. העתק את כל הקוד מהדף בכפתור Copy\u{00A0}Code, והדבק שוב."
+                    }
+                }
+                if !p.isRunning {
+                    let st = claudeAuthStatus(path)
+                    if st.loggedIn == true && (p.terminationStatus == 0 || !wasLoggedIn) { finish(true, nil); return }
+                    finish(false, loginFailureKind(buf.text, quick: Date().timeIntervalSince(start) < 8, codeMode: codeMode)); return
+                }
+                // בודקים גם בעצמנו (אולי התחבר בדרך אחרת), כל 3 שניות. רק כשקודם היה "לא מחובר"
+                if !wasLoggedIn && Date().timeIntervalSince(lastPoll) > 3 {
+                    lastPoll = Date()
+                    if claudeAuthStatus(path, timeout: 5).loggedIn == true { Thread.sleep(forTimeInterval: 0.5); finish(true, nil); return }
+                }
+                if Date().timeIntervalSince(start) > timeout { finish(false, .timeout); return }
+            }
+        }
+    }
+    // קוד מהדפדפן (בדרך החלופית, או בגרסאות שמציגות קוד במקום לחזור לבד)
+    func sendLoginCode(_ code: String) {
+        let c = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !c.isEmpty, let h = loginInput, loginProc?.isRunning == true else { return }
+        loginCodeHint = ""
+        try? h.write(contentsOf: Data((c + "\n").utf8))
+    }
+    func copyLoginLink() {
+        guard let u = loginURL else { return }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(u.absoluteString, forType: .string)
+    }
+    func cancelClaudeLogin() {
+        loginGen += 1
+        if let p = loginProc, p.isRunning { p.terminate() }
+        loginProc = nil; loginInput = nil; loginURL = nil; loginNeedsCode = false; loginCodeHint = ""
+        if claude == .loggingIn { claude = .notLoggedIn }
+    }
+    private func loginSucceeded(_ path: String) {
+        rememberClaudePath(path); loginDoneAt = Date()
+        claudeFromDesktop = isDesktopClaude(path)
+        claude = .ok; claudeNote = ""; loginError = ""; loginOutdated = false
+        checkGen += 1; runHealth(path, gen: checkGen)
+        NSApp.activate(ignoringOtherApps: true)   // חוזרים מהדפדפן לטימי
+        // ממשיכים לבד אחרי רגע (שיראו "מחובר"), רק אם עדיין מחובר. מי שכבר עבר את ההגדרה בעבר חוזר ישר למסך הסיום
+        let next = UserDefaults.standard.bool(forKey: "onboarded") ? 6 : 5
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { if self.step == 4 && self.claude == .ok { self.go(next) } }
+    }
     func chooseFolder() {
         let p = NSOpenPanel()
         p.canChooseDirectories = true; p.canChooseFiles = false; p.canCreateDirectories = true
@@ -2775,6 +3797,8 @@ final class Onboarding: ObservableObject {
 struct OnboardingView: View {
     @ObservedObject var o: Onboarding
     var close: () -> Void
+    @State private var loginCode = ""
+    @State private var linkCopied = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2812,10 +3836,11 @@ struct OnboardingView: View {
         .id(Theme.version)   // שינוי מראה כשהחלון פתוח
     }
 
-    var avatar: some View {
+    var avatar: some View { avatar(96) }
+    func avatar(_ size: CGFloat) -> some View {
         Group {
             if let img = resImage("timmy") {
-                Image(nsImage: img).resizable().interpolation(.high).frame(width: 96, height: 96)
+                Image(nsImage: img).resizable().interpolation(.high).frame(width: size, height: size)
                     .shadow(color: amber.opacity(0.35), radius: 16)
             } else { avatarFallback }
         }
@@ -2854,14 +3879,14 @@ struct OnboardingView: View {
         }.buttonStyle(.plain)
     }
 
-    func status(_ ok: Bool, _ okText: String, _ waitText: String, critical: Bool = false) -> some View {
+    func status(_ ok: Bool, _ okText: String, _ waitText: String, critical: Bool = false, compact: Bool = false) -> some View {
         HStack(spacing: 8) {
             Image(systemName: ok ? "checkmark.circle.fill" : (critical ? "exclamationmark.triangle.fill" : "circle.dashed"))
                 .foregroundColor(ok ? okInk : (critical ? errInk : ink.opacity(0.4)))
             Text(he(ok ? okText : waitText)).font(.system(size: 13, weight: .medium))
                 .foregroundColor(ok ? ink : ink.opacity(0.55))
         }
-        .padding(.vertical, 9).padding(.horizontal, 14)
+        .padding(.vertical, compact ? 6 : 9).padding(.horizontal, 14)
         .background(RoundedRectangle(cornerRadius: 10).fill(ink.opacity(0.06)))
     }
 
@@ -2949,7 +3974,7 @@ struct OnboardingView: View {
     }
 
     var claudeStep: some View {
-        VStack(spacing: 18) {
+        VStack(spacing: o.loginError.isEmpty ? 18 : 14) {
             Group {
                 if let logo = resImage("claude") {
                     Image(nsImage: logo).resizable().interpolation(.high).frame(width: 46, height: 46)
@@ -2957,56 +3982,145 @@ struct OnboardingView: View {
                     Image(systemName: "sparkles").font(.system(size: 40)).foregroundColor(amber)
                 }
             }
-            header("החיבור ל-Claude", "את הנקודות, הסיכום והמשימות כותב Claude,\nדרך Claude Code שמותקן אצלך ועם המנוי שלך. בלי מפתחות ובלי הגדרות.\nרק הטקסט של השיחה נשלח, לא ההקלטה.")
+            header("החיבור ל-Claude", "את הנקודות, הסיכום והמשימות כותב Claude,\nדרך Claude Code ועם המנוי שלך, בלי מפתחות ובלי הגדרות.\nרק הטקסט של השיחה נשלח, לא ההקלטה.")
             switch o.claude {
             case .unknown, .checking:
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(he("בודק את החיבור ל-Claude…")).font(.system(size: 13, weight: .medium)).foregroundColor(ink.opacity(0.7))
-                }
-                .padding(.vertical, 9).padding(.horizontal, 14)
-                .background(RoundedRectangle(cornerRadius: 10).fill(ink.opacity(0.06)))
+                busy("בודק את החיבור ל-Claude…")
+                secondary("דלג בינתיים") { o.go(5) }
             case .ok:
                 status(true, "מחובר ל-Claude", "")
+                if o.claudeFromDesktop { note("משתמש ב-Claude Code שבתוך אפליקציית Claude") }
                 primary("המשך") { o.go(5) }
             case .notInstalled:
                 status(false, "", "לא מצאתי את Claude Code במחשב", critical: true)
-                Text(he("בלי Claude אקליט ואתמלל, אבל בלי נקודות וסיכום.")).font(.system(size: 12)).foregroundColor(ink.opacity(0.5))
-                // כפתור הורדה עם הלוגו של Claude
-                Button(action: { NSWorkspace.shared.open(URL(string: "https://claude.com/claude-code")!) }) {
-                    HStack(spacing: 10) {
-                        if let logo = resImage("claude") {
-                            Image(nsImage: logo).resizable().interpolation(.high).frame(width: 22, height: 22)
-                        }
-                        Text(he("הורד את Claude Code")).font(.system(size: 15, weight: .semibold)).foregroundColor(ink)
-                    }
-                    .frame(maxWidth: 280).padding(.vertical, 11)
-                    .background(Capsule().fill(Color(red: 0.85, green: 0.47, blue: 0.34).opacity(0.22)))
-                    .overlay(Capsule().stroke(Color(red: 0.85, green: 0.47, blue: 0.34).opacity(0.8), lineWidth: 1.2))
+                if hasClaudeDesktop {
+                    // יש רק את אפליקציית Claude: הלשונית Code מורידה את Claude Code לבד
+                    note("יש לך את אפליקציית Claude, אבל עוד בלי Claude Code. פתח באפליקציה את הלשונית Code פעם אחת (היא מתקינה אותו לבד), וחזור לכאן. אבדוק שוב לבד.")
+                    primary("פתח את אפליקציית Claude") { openClaudeDesktop() }
+                } else {
+                    // הדרך הפשוטה: אפליקציית Claude, והלשונית Code שבה מתקינה את Claude Code לבד
+                    note("Claude Code זו תוכנה של Anthropic שעובדת עם המנוי שלך ל-Claude. הכי פשוט: התקן את אפליקציית Claude, פתח בה את הלשונית Code פעם אחת (היא מתקינה את Claude Code לבד), וחזור לכאן. אבדוק שוב לבד.")
+                    downloadButton("הורד את אפליקציית Claude")
                 }
-                .buttonStyle(.plain)
-                .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
-                secondary("התקנתי, בדוק שוב") { o.checkClaude() }
-                secondary("המשך בלי סיכומים") { o.go(5) }
-            case .notLoggedIn:
-                status(false, "", "יש Claude Code, אבל הוא לא מחובר לחשבון", critical: true)
-                Text(he("לחץ \"התחבר\", ייפתח טרמינל עם Claude. התחבר לחשבון שלך, ואז חזור לכאן ולחץ \"בדוק שוב\"."))
-                    .font(.system(size: 12)).foregroundColor(ink.opacity(0.6)).multilineTextAlignment(.center)
                 HStack(spacing: 10) {
-                    primary("התחבר") { o.openClaudeLogin() }
-                    secondary("בדוק שוב") { o.checkClaude() }
+                    secondary("התקנתי, בדוק שוב") { o.checkClaude() }
+                    secondary("המשך בלי סיכומים") { o.go(5) }
                 }
-                secondary("המשך בלי סיכומים") { o.go(5) }
+            case .notLoggedIn:
+                status(false, "", o.claudeNote.isEmpty ? "Claude Code מותקן, אבל עוד לא מחובר לחשבון שלך" : o.claudeNote, critical: true)
+                if o.loginOutdated {
+                    // גרסה ישנה בלי התחברות מכאן: גרסה חדשה מגיעה דרך אפליקציית Claude, ואז בודקים שוב (גם לבד)
+                    warn(o.loginError)
+                    note(hasClaudeDesktop ? "פתח את אפליקציית Claude ובחר בה את הלשונית Code פעם אחת. היא מביאה גרסה חדשה של Claude Code, ואז אבדוק שוב לבד."
+                                          : "התקן את אפליקציית Claude, פתח בה את הלשונית Code פעם אחת (היא מביאה גרסה חדשה של Claude Code), וחזור לכאן. אבדוק שוב לבד.")
+                    if hasClaudeDesktop { primary("פתח את אפליקציית Claude") { openClaudeDesktop() } } else { downloadButton("הורד את אפליקציית Claude") }
+                } else if !o.loginError.isEmpty {
+                    // ההתחברות בדפדפן נכשלה: לנסות שוב, או הדרך החלופית עם קוד
+                    warn(o.loginError)
+                    primary("נסה שוב") { o.startClaudeLogin(codeMode: o.lastCodeMode) }
+                    VStack(spacing: 8) {
+                        note("לא מצליח? אפשר להתחבר עם קוד: בדף שייפתח לוחצים על כפתור האישור (Authorize), מעתיקים את הקוד שמופיע ומדביקים אותו כאן.")
+                        secondary("התחבר עם קוד") { o.startClaudeLogin(codeMode: true) }
+                    }
+                    .padding(.vertical, 10).padding(.horizontal, 14)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(ink.opacity(0.05)))
+                } else {
+                    note("לחץ \"התחבר\" וייפתח דף של Claude בדפדפן.\nלחץ שם על כפתור האישור (Authorize), וטימי ימשיך לבד."
+                         + (hasClaudeDesktop ? "\nגם אם אתה כבר מחובר באפליקציית Claude, צריך לאשר פעם אחת גם כאן." : ""))
+                    primary("התחבר") { o.startClaudeLogin() }
+                }
+                HStack(spacing: 10) {
+                    secondary("בדוק שוב") { o.checkClaude() }
+                    secondary("המשך בלי סיכומים") { o.go(5) }
+                }
+            case .loggingIn:
+                busy("ממתין לאישור בדפדפן…")
+                note(o.loginNeedsCode ? "בדף שנפתח בדפדפן לחץ על כפתור האישור (Authorize). יופיע קוד: העתק אותו (Copy Code) והדבק כאן."
+                                      : "בדף שנפתח בדפדפן לחץ על כפתור האישור (Authorize). אם צריך, התחבר קודם לחשבון Claude שלך. אחרי האישור טימי ימשיך לבד.")
+                if o.loginNeedsCode {
+                    HStack(spacing: 8) {
+                        TextField(he("הדבק כאן את הקוד"), text: $loginCode).textFieldStyle(.roundedBorder).frame(width: 220)
+                            .onSubmit { o.sendLoginCode(loginCode); loginCode = "" }
+                        secondary("שלח") { o.sendLoginCode(loginCode); loginCode = "" }
+                    }
+                    if !o.loginCodeHint.isEmpty { warn(o.loginCodeHint) }
+                }
+                if o.loginURL != nil {
+                    HStack(spacing: 14) {
+                        link("הדפדפן לא נפתח? לחץ כאן") { if let u = o.loginURL { openExternal(u) } }
+                        link(linkCopied ? "הקישור הועתק" : "העתק את הקישור") {
+                            o.copyLoginLink(); linkCopied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { linkCopied = false }
+                        }
+                    }
+                }
+                secondary("ביטול") { o.cancelClaudeLogin() }
+            case .problem(let msg):
+                status(false, "", msg, critical: true)
+                if msg == claudeBrokenText {
+                    if hasClaudeDesktop { secondary("פתח את אפליקציית Claude") { openClaudeDesktop() } } else { downloadButton("הורד את אפליקציית Claude") }
+                }
+                primary("בדוק שוב") { o.checkClaude() }
+                secondary("המשך בכל זאת") { o.go(5) }
             }
         }
         .onAppear {
-            if let st = ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE"] {
-                o.claude = st == "missing" ? .notInstalled : .notLoggedIn; return
-            }
-            if o.claude == .unknown || o.claude == .notInstalled { o.checkClaude() }
+            if o.applyDemoClaude() { return }
+            if ![.ok, .loggingIn, .checking].contains(o.claude) { o.checkClaude() }
         }
     }
 
+    var hasClaudeDesktop: Bool {
+        if let v = ProcessInfo.processInfo.environment["TIMMY_DEMO_CLAUDE_DESKTOP"] { return v != "0" }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") != nil
+    }
+    func openClaudeDesktop() {
+        if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") {
+            if dryOpen { dryLog("open: " + u.path) } else { NSWorkspace.shared.openApplication(at: u, configuration: NSWorkspace.OpenConfiguration()) }
+        }
+    }
+    // כפתור הורדה עם הלוגו של Claude
+    func downloadButton(_ title: String) -> some View {
+        Button(action: { openExternal(URL(string: "https://claude.ai/download")!) }) {
+            HStack(spacing: 10) {
+                if let logo = resImage("claude") {
+                    Image(nsImage: logo).resizable().interpolation(.high).frame(width: 22, height: 22)
+                }
+                Text(he(title)).font(.system(size: 15, weight: .semibold)).foregroundColor(ink)
+            }
+            .frame(maxWidth: 280).padding(.vertical, 11)
+            .background(Capsule().fill(Color(red: 0.85, green: 0.47, blue: 0.34).opacity(0.22)))
+            .overlay(Capsule().stroke(Color(red: 0.85, green: 0.47, blue: 0.34).opacity(0.8), lineWidth: 1.2))
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+    }
+    func link(_ t: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(he(t)).font(.system(size: 12, weight: .medium)).underline().foregroundColor(amber)
+        }.buttonStyle(.plain)
+        .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+    }
+    func busy(_ t: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(he(t)).font(.system(size: 13, weight: .medium)).foregroundColor(ink.opacity(0.7))
+        }
+        .padding(.vertical, 9).padding(.horizontal, 14)
+        .background(RoundedRectangle(cornerRadius: 10).fill(ink.opacity(0.06)))
+    }
+    func note(_ t: String) -> some View {
+        Text(he(t)).font(.system(size: 12)).foregroundColor(ink.opacity(0.6))
+            .multilineTextAlignment(.center).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
+    }
+    func warn(_ t: String) -> some View {
+        Text(he(t)).font(.system(size: 12, weight: .medium)).foregroundColor(errInk)
+            .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+    }
+    var claudeOffText: String {
+        if case .problem = o.claude { return "חיבור ל-Claude: מחובר, אבל לא ענה בבדיקה" }
+        return "חיבור ל-Claude: כבוי (רק תמלול)"
+    }
     var shortFolder: String { FileManager.default.displayName(atPath: o.folder) }
     var parentFolder: String { FileManager.default.displayName(atPath: (o.folder as NSString).deletingLastPathComponent) }
     var spaceOK: Bool { o.freeGB >= 2 }
@@ -3036,21 +4150,34 @@ struct OnboardingView: View {
         }
     }
 
+    func settingSwitch(_ title: String, _ on: Binding<Bool>) -> some View {
+        HStack(spacing: 0) {
+            Text(title).font(.system(size: 13, weight: .medium)).foregroundColor(ink.opacity(0.85))
+            Spacer(minLength: 16)
+            Toggle(isOn: on) { Text(title) }.labelsHidden().toggleStyle(.switch).tint(amber)
+        }
+    }
+
+    // מסך הסיום צפוף (4 שורות מצב + 2 מתגים): תמונה קטנה יותר ורווחים קטנים, כדי שהכל ייכנס בחלון
     var doneStep: some View {
-        VStack(spacing: 20) {
-            avatar
+        VStack(spacing: 10) {
+            avatar(68)
             header("מוכן!", "אני מחכה לך למעלה באמצע המסך, ליד הנוטש.\nלחיצה עליי מתחילה הקלטה, ו\"עצור\" מסיים.\nבסוף אפתח לך את הסיכום בתיקייה.")
-            VStack(spacing: 8) {
-                status(o.screenOK, "קול של כרום: פעיל", "קול של כרום: לא פעיל")
-                status(o.micOK, "מיקרופון: פעיל", "מיקרופון: כבוי (רק הצד השני יוקלט)")
-                Button(action: { o.go(4) }) { status(o.claude == .ok, "חיבור ל-Claude: פעיל (נקודות וסיכומים)", "חיבור ל-Claude: כבוי (רק תמלול)") }
+            VStack(spacing: 6) {
+                status(o.screenOK, "קול של כרום: פעיל", "קול של כרום: לא פעיל", compact: true)
+                status(o.micOK, "מיקרופון: פעיל", "מיקרופון: כבוי (רק הצד השני יוקלט)", compact: true)
+                Button(action: { o.go(4) }) { status(o.claude == .ok, "חיבור ל-Claude: פעיל (נקודות וסיכומים)", claudeOffText, compact: true) }
                     .buttonStyle(.plain)
-                Button(action: { o.go(5) }) { status(spaceOK, "שמירה ב: " + shortFolder, "שמירה ב: " + shortFolder + " (מעט מקום)") }
+                Button(action: { o.go(5) }) { status(spaceOK, "שמירה ב: " + shortFolder, "שמירה ב: " + shortFolder + " (מעט מקום)", compact: true) }
                     .buttonStyle(.plain)
-                Toggle(isOn: Binding(get: { o.launchAtLogin }, set: { o.setLaunchAtLogin($0) })) {
-                    Text("הפעל את טימי כשהמחשב נדלק").font(.system(size: 13, weight: .medium)).foregroundColor(ink.opacity(0.85))
+                // שני המתגים באותו רוחב: הטקסט מימין והמתג משמאל, המתגים זה מתחת לזה
+                VStack(spacing: 4) {
+                    settingSwitch("הפעל את טימי כשהמחשב נדלק", Binding(get: { o.launchAtLogin }, set: { o.setLaunchAtLogin($0) }))
+                    // מי שצופה בשיתוף מסך (למשל בגוגל מיט) לא רואה את טימי ואת החלונות שלו. כבוי = להדגמות של טימי
+                    settingSwitch("להסתיר את טימי בשיתוף מסך", Binding(get: { o.hideInShare }, set: { setHideInScreenShare($0) }))
+                        .help("כשאתה משתף מסך (למשל בגוגל מיט), מי שצופה לא יראה את טימי. טימי גם לא יופיע בצילומי מסך. כבה אם אתה רוצה להראות את טימי או לצלם אותו")
                 }
-                .toggleStyle(.switch).tint(amber)
+                .fixedSize()
             }
             primary("יאללה") { o.finish(); close() }
             HStack(spacing: 10) {
@@ -3071,7 +4198,7 @@ func configModel(_ key: String, _ def: String) -> String {
 }
 var summaryModel: String { configModel("summary_model", "sonnet") }
 
-// TIMMY_DRY_OPEN=1: פתיחת Finder / דפדפן / טרמינל רק נרשמת ל-dry-open.log (בדיקות בלי חלונות קופצים)
+// TIMMY_DRY_OPEN=1: פתיחת Finder / דפדפן רק נרשמת ל-dry-open.log (בדיקות בלי חלונות קופצים)
 let dryOpen = ProcessInfo.processInfo.environment["TIMMY_DRY_OPEN"] != nil
 func dryLog(_ s: String) {
     let u = appDir.appendingPathComponent("dry-open.log")
@@ -3080,38 +4207,197 @@ func dryLog(_ s: String) {
 }
 func revealInFinder(_ u: URL) { if dryOpen { dryLog("reveal: " + u.path) } else { NSWorkspace.shared.activateFileViewerSelecting([u]) } }
 func openExternal(_ u: URL) { if dryOpen { dryLog("open: " + (u.isFileURL ? u.path : u.absoluteString)) } else { NSWorkspace.shared.open(u) } }
-func runInTerminal(_ command: String) {
-    if dryOpen { dryLog("terminal: " + command); return }
-    let esc = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-    NSAppleScript(source: "tell application \"Terminal\"\nactivate\ndo script \"\(esc)\"\nend tell")?.executeAndReturnError(nil)
+
+// MARK: - Claude Code: איפה הוא מותקן, האם מחובר לחשבון
+
+// "2.1.326 (Claude Code)" / "v22.12.0" -> [2, 1, 326]
+func versionKey(_ s: String) -> [Int] {
+    guard let g = rxGroups(s, "(\\d+)\\.(\\d+)(?:\\.(\\d+))?") else { return [] }
+    return g.dropFirst().map { Int($0) ?? 0 }
+}
+func versionNewer(_ a: [Int], _ b: [Int]) -> Bool { b.lexicographicallyPrecedes(a) }
+// Claude Code שמגיע בתוך אפליקציית Claude (הלשונית Code):
+// ~/Library/Application Support/Claude/claude-code/<גרסה>/<מזהה>/claude.app/Contents/MacOS/claude (החדשה קודם).
+// האפליקציה מחליפה את התיקייה בכל עדכון, לכן מחפשים מחדש כל פעם ולא סומכים על נתיב שנשמר
+let desktopClaudeBase = home.appendingPathComponent("Library/Application Support/Claude/claude-code").path
+func desktopClaudePaths() -> [String] {
+    let fm = FileManager.default
+    guard let vers = try? fm.contentsOfDirectory(atPath: desktopClaudeBase) else { return [] }
+    var out: [String] = []
+    for v in vers.sorted(by: { versionNewer(versionKey($0), versionKey($1)) }) {
+        for id in ((try? fm.contentsOfDirectory(atPath: desktopClaudeBase + "/" + v)) ?? []).sorted() {
+            out.append("\(desktopClaudeBase)/\(v)/\(id)/claude.app/Contents/MacOS/claude")
+        }
+    }
+    return out
+}
+func isDesktopClaude(_ path: String) -> Bool { path.hasPrefix(desktopClaudeBase) || path.contains("/Claude.app/") }
+// כל ההתקנות של Claude Code שקיימות במחשב, בלי כפולים (קודם זו שנשמרה בהגדרות).
+// TIMMY_CLAUDE_SEARCH (נתיבים מופרדים ב-":") מחליף את רשימת המקומות הרגילה (בדיקות)
+func claudeCandidatePaths() -> [String] {
+    let fm = FileManager.default, h = home.path
+    var c: [String] = []
+    if let p = loadConfig()["claude_path"] as? String, !p.isEmpty { c.append(p) }
+    if let s = ProcessInfo.processInfo.environment["TIMMY_CLAUDE_SEARCH"] {
+        c += s.split(separator: ":").map(String.init)
+    } else {
+        // המתקין הרשמי (~/.local/bin), התקנה מקומית ישנה, Homebrew, npm (גם nvm/volta/bun), ואפליקציית Claude
+        c += [h + "/.local/bin/claude", h + "/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+              h + "/.npm-global/bin/claude", h + "/.volta/bin/claude", h + "/.bun/bin/claude"]
+        if let vers = try? fm.contentsOfDirectory(atPath: h + "/.nvm/versions/node") {
+            c += vers.sorted { versionNewer(versionKey($0), versionKey($1)) }.map { h + "/.nvm/versions/node/\($0)/bin/claude" }
+        }
+        c += desktopClaudePaths()
+    }
+    var seen = Set<String>(), out: [String] = []
+    for p in c where fm.isExecutableFile(atPath: p) {
+        if seen.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path).inserted { out.append(p) }
+    }
+    return out
+}
+// Claude Code לשימוש (ההרצות של טימי): זה שנשמר בהגדרות אם הוא עוד קיים, אחרת הראשון שנמצא
+func findClaudePath() -> String? { claudeCandidatePaths().first }
+// שומר את הבחירה רק כשהיא השתנתה (הבדיקה רצה ברקע בכל הפעלה, ולא צריך לכתוב את ההגדרות בכל פעם)
+func rememberClaudePath(_ p: String) {
+    if (loadConfig()["claude_path"] as? String) != p { saveConfig(["claude_path": p]) }
 }
 
-// Claude Code: איפה הוא מותקן (קודם claude_path מההגדרות)
-func findClaudePath() -> String? {
-    var cands: [String] = []
-    if let p = loadConfig()["claude_path"] as? String, !p.isEmpty { cands.append(p) }
-    cands += [home.path + "/.claude/local/claude", home.path + "/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
-    if let vers = try? FileManager.default.contentsOfDirectory(atPath: home.path + "/.nvm/versions/node") {
-        cands += vers.sorted(by: >).map { home.path + "/.nvm/versions/node/\($0)/bin/claude" }
+// "claude auth status --json": מחובר? (nil = הפקודה לא ענתה, למשל גרסה ישנה מאוד או תקועה)
+struct ClaudeAuth { var loggedIn: Bool?; var method = "" }
+func claudeAuthStatus(_ path: String, timeout: TimeInterval? = nil) -> ClaudeAuth {
+    let t = timeout ?? Double(ProcessInfo.processInfo.environment["TIMMY_CLAUDE_STATUS_TIMEOUT"] ?? "") ?? 10
+    let r = runProcess(path, ["auth", "status", "--json"], timeout: t)
+    guard r.launched, !r.timedOut, let o = lastJSONObject(r.out, key: "loggedIn"), let li = o["loggedIn"] as? Bool else { return ClaudeAuth(loggedIn: nil) }
+    return ClaudeAuth(loggedIn: li, method: o["authMethod"] as? String ?? "")
+}
+private final class ProbeBox { let lock = NSLock(); var items: [Int: (path: String, version: [Int], runs: Bool, auth: ClaudeAuth)] = [:] }
+// בוחר התקנה ובודק אם היא מחוברת. כמה התקנות: עדיפות למחוברת, ובתוכן לחדשה ביותר. הבחירה נשמרת ב-claude_path
+func detectClaude(allowHealth: Bool = true) -> (state: Onboarding.ClaudeState, path: String?, note: String) {
+    let cands = claudeCandidatePaths()
+    if cands.isEmpty { return (.notInstalled, nil, "") }
+    let box = ProbeBox()
+    DispatchQueue.concurrentPerform(iterations: cands.count) { i in
+        let v = runProcess(cands[i], ["--version"], timeout: 15)
+        let a = claudeAuthStatus(cands[i])
+        let item = (path: cands[i], version: versionKey(v.out), runs: (v.launched && !v.timedOut && v.status == 0) || a.loggedIn != nil, auth: a)
+        box.lock.lock(); box.items[i] = item; box.lock.unlock()
     }
-    return cands.first { FileManager.default.isExecutableFile(atPath: $0) }
+    // סדר: חדשה קודם; באותה גרסה, לפי סדר החיפוש (זו שנשמרה קודם)
+    let all = (0..<cands.count).compactMap { box.items[$0] }
+    let order = all.enumerated().sorted { x, y in
+        x.element.version != y.element.version ? versionNewer(x.element.version, y.element.version) : x.offset < y.offset
+    }.map(\.element)
+    let runs = order.filter(\.runs)
+    guard !runs.isEmpty else {
+        return (.problem(claudeBrokenText), cands.first, "")
+    }
+    if let best = runs.first(where: { $0.auth.loggedIn == true }) {
+        rememberClaudePath(best.path); return (.ok, best.path, "")
+    }
+    if let best = runs.first(where: { $0.auth.loggedIn == false }) {
+        rememberClaudePath(best.path); return (.notLoggedIn, best.path, "")
+    }
+    // אף אחת לא ענתה על "auth status" (גרסה ישנה, או תקועה): נשארת רק השאלה הקטנה ל-Claude
+    let best = runs[0]
+    rememberClaudePath(best.path)
+    if !allowHealth { return (.unknown, best.path, "") }   // בהפעלה של טימי לא שואלים את Claude
+    switch claudeHealthCheck(best.path) {
+    case .ok: return (.ok, best.path, "")
+    case .auth: return (.notLoggedIn, best.path, "")
+    case .failed(let msg): return (.problem(msg), best.path, "")
+    }
+}
+
+let claudeBrokenText = "מצאתי את Claude Code, אבל הוא לא נפתח. אפשר לקבל אותו מחדש דרך אפליקציית Claude, ואז ללחוץ \"בדוק שוב\"."
+enum ClaudeProblem { case network, timeout, limit, other }
+func claudeProblemText(_ k: ClaudeProblem) -> String {
+    switch k {
+    case .network: return "אתה מחובר ל-Claude, אבל כרגע אין אליו חיבור. בדוק שיש אינטרנט ולחץ \"בדוק שוב\"."
+    case .timeout: return "אתה מחובר ל-Claude, אבל הוא לא ענה בזמן. אולי האינטרנט איטי או ש-Claude עמוס. נסה \"בדוק שוב\" בעוד דקה."
+    case .limit: return "אתה מחובר ל-Claude, אבל הגעת למכסת השימוש של המנוי. הסיכומים יחזרו לעבוד כשהמכסה תתחדש."
+    case .other: return "אתה מחובר ל-Claude, אבל הוא לא הצליח לענות כרגע. נסה \"בדוק שוב\" בעוד דקה."
+    }
+}
+enum ClaudeHealth { case ok, auth, failed(String) }
+// שאלה קטנה ל-Claude, עם זמן קצוב. רק בדיקת תקינות משנית: מראה אם הוא באמת עונה, ולמה לא
+func claudeHealthCheck(_ path: String) -> ClaudeHealth {
+    let t = Double(ProcessInfo.processInfo.environment["TIMMY_CLAUDE_HEALTH_TIMEOUT"] ?? "") ?? 30
+    let r = runProcess(path, ["-p", "--model", "haiku", "--strict-mcp-config", "--no-session-persistence", "ענה במילה אחת בלבד: מחובר"],
+                       timeout: t, mergeStderr: true)
+    if r.ok { return .ok }
+    if r.timedOut { return .failed(claudeProblemText(.timeout)) }
+    if !r.launched { return .failed("לא הצלחתי להפעיל את Claude Code. כדאי להתקין אותו מחדש וללחוץ \"בדוק שוב\".") }
+    let t2 = r.out.lowercased()
+    if ["/login", "invalid api key", "oauth token", "not logged in", "authentication_error", "please log in", "token has expired", "revoked", "error: 401", "status 401"].contains(where: t2.contains) { return .auth }
+    if ["usage limit", "rate limit", "limit reached", "rate_limit", "quota", "error: 429", "overloaded"].contains(where: t2.contains) { return .failed(claudeProblemText(.limit)) }
+    if ["enotfound", "econnrefused", "etimedout", "econnreset", "getaddrinfo", "network", "fetch failed", "unable to connect", "connection error", "offline"].contains(where: t2.contains) { return .failed(claudeProblemText(.network)) }
+    return .failed(claudeProblemText(.other))
+}
+// למה ההתחברות לא הסתיימה. outdated = גרסה ישנה בלי "auth login"; flagRejected = גרסה שלא מכירה את "--claudeai".
+// אין מעבר לטרמינל באף מקרה: גרסה ישנה מקבלת הסבר איך להביא גרסה חדשה דרך אפליקציית Claude
+enum LoginFailure { case outdated, flagRejected, network, badCode, timeout, other }
+func loginFailureKind(_ out: String, quick: Bool, codeMode: Bool) -> LoginFailure {
+    let t = out.lowercased()
+    if quick && t.contains("claudeai") && (t.contains("unknown option") || t.contains("unrecognized")) { return .flagRejected }
+    if quick && (t.contains("unknown command") || t.contains("unknown option") || t.contains("error: unknown") || (t.contains("usage:") && !t.contains("http"))) { return .outdated }
+    if ["enotfound", "econnrefused", "etimedout", "getaddrinfo", "network", "fetch failed", "unable to connect"].contains(where: t.contains) { return .network }
+    if ["wasn't accepted", "was not accepted", "invalid code", "invalid_grant", "invalid authorization code"].contains(where: t.contains) { return .badCode }
+    return .other
+}
+func loginFailureText(_ f: LoginFailure) -> String {
+    switch f {
+    case .outdated, .flagRejected: return "הגרסה של Claude Code שבמחשב ישנה מדי, ולא יודעת להתחבר מכאן. צריך גרסה חדשה, וזה לוקח דקה."
+    case .network: return "אין חיבור לאינטרנט, אז ההתחברות לא הושלמה. בדוק את החיבור ונסה שוב."
+    case .badCode: return "הקוד לא התקבל. נסה שוב, והפעם העתק את כל הקוד בכפתור Copy\u{00A0}Code שבדף."
+    case .timeout: return "עבר הרבה זמן ולא הגיע אישור מהדפדפן, אז עצרתי. אפשר לנסות שוב."
+    case .other: return "ההתחברות לא הושלמה. אפשר לנסות שוב, וללחוץ על כפתור האישור (Authorize) בדף שנפתח בדפדפן."
+    }
+}
+// כתיבה לצינור של תהליך שכבר נסגר מחזירה שגיאה (שנבלעת) במקום להרוג את טימי (SIGPIPE)
+func noSigPipe(_ p: Pipe) { _ = fcntl(p.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) }
+// שומר קטן: אם טימי נעלם (נסגר, נהרג או קרס) והתהליך עוד רץ, הוא נסגר אחרי שנייה. כשהתהליך מסתיים, השומר יוצא
+func watchChild(_ pid: Int32) {
+    let me = getpid()
+    let w = Process(); w.executableURL = URL(fileURLWithPath: "/bin/sh")
+    w.arguments = ["-c", "while kill -0 \(me) 2>/dev/null && kill -0 \(pid) 2>/dev/null; do sleep 1; done; kill -0 \(me) 2>/dev/null || kill \(pid) 2>/dev/null; true"]
+    w.standardInput = FileHandle.nullDevice; w.standardOutput = FileHandle.nullDevice; w.standardError = FileHandle.nullDevice
+    try? w.run()
+}
+func firstURL(in s: String) -> URL? {
+    guard let g = rxGroups(s, "(https://[^\\s\"'<>]+)") else { return nil }
+    return URL(string: g[1])
+}
+// טקסט שנאסף מכמה תהליכונים
+final class LockedText {
+    private let lock = NSLock(); private var s = ""
+    var text: String { lock.lock(); defer { lock.unlock() }; return s }
+    func append(_ x: String) { lock.lock(); s += x; lock.unlock() }
 }
 
 struct ProcResult {
-    var status: Int32 = -1, out = "", timedOut = false, launched = false
-    var ok: Bool { launched && !timedOut && status == 0 && !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var status: Int32 = -1, out = "", timedOut = false, launched = false, cancelled = false
+    var ok: Bool { launched && !timedOut && !cancelled && status == 0 && !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+}
+// ביטול של פעולה ארוכה (כפתור "בטל"): התהליך שרץ עכשיו נהרג, והשלבים הבאים לא מתחילים
+final class CancelToken {
+    private let lock = NSLock()
+    private var flag = false
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+    func cancel() { lock.lock(); flag = true; lock.unlock() }
 }
 private final class DataBox { var data = Data() }
-// מריץ תהליך ומחכה (לא על ה-main thread). חורג מהזמן: נהרג
-func runProcess(_ exe: String, _ args: [String], input: String? = nil, timeout: TimeInterval) -> ProcResult {
+// מריץ תהליך ומחכה (לא על ה-main thread). חורג מהזמן או בוטל: נהרג
+func runProcess(_ exe: String, _ args: [String], input: String? = nil, timeout: TimeInterval, token: CancelToken? = nil, cwd: URL? = nil, mergeStderr: Bool = false) -> ProcResult {
     var r = ProcResult()
+    if token?.isCancelled == true { r.cancelled = true; return r }
     let p = Process(); p.executableURL = URL(fileURLWithPath: exe); p.arguments = args
-    p.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
+    p.currentDirectoryURL = cwd ?? URL(fileURLWithPath: NSTemporaryDirectory())
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = (exe as NSString).deletingLastPathComponent + ":/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
     p.environment = env
     let out = Pipe(), inp = Pipe()
-    p.standardOutput = out; p.standardError = FileHandle.nullDevice
+    noSigPipe(inp)
+    p.standardOutput = out; p.standardError = mergeStderr ? out : FileHandle.nullDevice
     p.standardInput = input == nil ? FileHandle.nullDevice : inp
     let box = DataBox(), g = DispatchGroup()
     do { try p.run() } catch { return r }
@@ -3122,9 +4408,10 @@ func runProcess(_ exe: String, _ args: [String], input: String? = nil, timeout: 
         DispatchQueue.global().async { try? inp.fileHandleForWriting.write(contentsOf: Data(input.utf8)); try? inp.fileHandleForWriting.close() }
     }
     let deadline = Date().addingTimeInterval(timeout)
-    while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+    while p.isRunning && Date() < deadline && token?.isCancelled != true { Thread.sleep(forTimeInterval: 0.1) }
     if p.isRunning {
-        r.timedOut = true; p.terminate()
+        if token?.isCancelled == true { r.cancelled = true } else { r.timedOut = true }
+        p.terminate()
         Thread.sleep(forTimeInterval: 1)
         if p.isRunning { kill(p.processIdentifier, SIGKILL) }
     }
@@ -3134,9 +4421,26 @@ func runProcess(_ exe: String, _ args: [String], input: String? = nil, timeout: 
     r.status = p.terminationStatus
     return r
 }
-func runClaude(_ args: [String], input: String? = nil, timeout: TimeInterval = 120) -> ProcResult {
+func runClaude(_ args: [String], input: String? = nil, timeout: TimeInterval = 120, token: CancelToken? = nil) -> ProcResult {
     guard let path = Onboarding.shared?.claudePath() ?? findClaudePath() else { return ProcResult() }
-    return runProcess(path, args, input: input, timeout: timeout)
+    return runProcess(path, args, input: input, timeout: timeout, token: token)
+}
+// Claude עם תמונות (עמודי PDF), בלי שום כלי: ההודעה עוברת כ-stream-json עם בלוקים של תמונה. מחזיר את הטקסט של התשובה
+func runClaudeWithImages(_ prompt: String, images: [URL], model: String, timeout: TimeInterval, token: CancelToken?) -> (text: String?, r: ProcResult) {
+    var content: [[String: Any]] = images.compactMap { u in
+        guard let d = try? Data(contentsOf: u) else { return nil }
+        return ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": d.base64EncodedString()]]
+    }
+    content.append(["type": "text", "text": prompt])
+    let msg: [String: Any] = ["type": "user", "message": ["role": "user", "content": content]]
+    guard let line = try? JSONSerialization.data(withJSONObject: msg), let s = String(data: line, encoding: .utf8) else { return (nil, ProcResult()) }
+    let r = runClaude(["-p", "--model", model, "--tools", "", "--strict-mcp-config", "--no-session-persistence",
+                       "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], input: s + "\n", timeout: timeout, token: token)
+    for l in r.out.components(separatedBy: "\n").reversed() where l.contains("\"type\":\"result\"") {
+        if let o = try? JSONSerialization.jsonObject(with: Data(l.utf8)) as? [String: Any], o["is_error"] as? Bool != true,
+           let t = o["result"] as? String, !t.isEmpty { return (t, r) }
+    }
+    return (nil, r)
 }
 // אובייקט ה-JSON האחרון בטקסט שיש בו את המפתח key
 func lastJSONObject(_ s: String, key: String) -> [String: Any]? {
@@ -3629,7 +4933,13 @@ func injectTimmyFooter(_ html: String) -> String {
 }
 
 // שורת תחתית בכל עמוד: פרטי הקשר (ימין) ומספר עמוד (שמאל)
-func stampFooter(_ url: URL, contact: String) {
+func stampFooter(_ url: URL, contact: String, pageNumbers: Bool = true) {
+    // PDF עם פונטים מסוג Type 3 (Chrome מדפיס כך פונטים משתנים): כל שמירה מחדש דרך PDFKit/CoreGraphics הופכת את הטקסט לציור,
+    // ואז אי אפשר לסמן או לחפש בו. טקסט שהלקוח יכול להעתיק (מחיר, טלפון) חשוב יותר משורת טימי, אז הקובץ נשאר כמו שהוא
+    if let raw = try? Data(contentsOf: url, options: .mappedIfSafe), raw.range(of: Data("/Type3".utf8)) != nil {
+        NSLog("stampFooter: Type 3 fonts in \(url.lastPathComponent), leaving the PDF as is")
+        return
+    }
     guard let doc = PDFDocument(url: url), doc.pageCount > 0, let first = doc.page(at: 0) else { return }
     // עמוד אחרון ריק (התוכן גלש בכמה פיקסלים של ריווח): מוחקים
     while doc.pageCount > 1, let last = doc.page(at: doc.pageCount - 1),
@@ -3668,9 +4978,11 @@ func stampFooter(_ url: URL, contact: String) {
         }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
-        let side: CGFloat = 54, y: CGFloat = 30
-        NSColor(white: 0.9, alpha: 1).setFill()
-        NSRect(x: side, y: y + 17, width: mb.width - 2 * side, height: 0.6).fill()
+        let side: CGFloat = 54, y: CGFloat = pageNumbers ? 30 : 14
+        if pageNumbers {
+            NSColor(white: 0.9, alpha: 1).setFill()
+            NSRect(x: side, y: y + 17, width: mb.width - 2 * side, height: 0.6).fill()
+        }
         let rtl = NSMutableParagraphStyle(); rtl.baseWritingDirection = .rightToLeft; rtl.alignment = .right
         let ltr = NSMutableParagraphStyle(); ltr.baseWritingDirection = .rightToLeft; ltr.alignment = .left
         let font = NSFont.systemFont(ofSize: 8)
@@ -3678,8 +4990,10 @@ func stampFooter(_ url: URL, contact: String) {
             NSAttributedString(string: "\u{200F}" + contact, attributes: [.font: font, .foregroundColor: gray, .paragraphStyle: rtl])
                 .draw(in: NSRect(x: mb.width / 2 + 75, y: y, width: mb.width / 2 - 75 - side, height: 13))   // חצי ימין, לא נוגע במרכז
         }
-        NSAttributedString(string: "\u{200F}עמוד \(i + 1) מתוך \(n)", attributes: [.font: font, .foregroundColor: gray, .paragraphStyle: ltr])
-            .draw(in: NSRect(x: side, y: y, width: 100, height: 13))
+        if pageNumbers {
+            NSAttributedString(string: "\u{200F}עמוד \(i + 1) מתוך \(n)", attributes: [.font: font, .foregroundColor: gray, .paragraphStyle: ltr])
+                .draw(in: NSRect(x: side, y: y, width: 100, height: 13))
+        }
         if poweredInFooter && i == n - 1 {
             let line = NSAttributedString(string: "\u{200F}" + timmyFooterLead + timmyFooterLink, attributes: [.font: NSFont.systemFont(ofSize: 7), .foregroundColor: NSColor(white: 0.6, alpha: 1)])
             let w = line.size().width, x0 = (mb.width - w) / 2 + 6
@@ -3721,23 +5035,41 @@ func swiftFallbackHTML(_ md: String) -> String {
 
 let pdfScript = appDir.appendingPathComponent("pdf.py").path
 // מסמך PDF מסיכום: pdf.py (Claude או המרה מקומית) -> HTML -> PDF בעמודי A4 + שורת תחתית
-func buildPDF(md: URL, dest: URL, local: Bool = false, preview: Bool = false, done: @escaping (_ ok: Bool, _ usedClaude: Bool, _ note: String?) -> Void) {
+func buildPDF(md: URL, dest: URL, local: Bool = false, preview: Bool = false, token: CancelToken? = nil, done: @escaping (_ ok: Bool, _ usedClaude: Bool, _ note: String?) -> Void) {
     DispatchQueue.global().async {
         _ = linkedSkill("pdf"); _ = linkedSkill("writing")   // סקיל שהנתיב שלו השתנה (עדכון תוסף) מתעדכן ב-config לפני ש-pdf.py קורא אותו
+        let viaSkill = skillRunsPDF() ? linkedSkill("pdf")?.name : nil
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("timmy-pdf-\(UUID().uuidString).html")
         var a = [pdfScript, md.path, "--out", tmp.path]
         if local { a.append("--local") }
         if preview { a.append("--preview") }
-        let r = runProcess(python, a, timeout: 160)
+        // pdf.py שומר על תקציב פנימי של כ-3 דקות (Claude + הסקריפט של הסקיל), ועונה לפני שהזמן כאן נגמר
+        let r = runProcess(python, a, timeout: 210, token: token)
+        if r.cancelled { DispatchQueue.main.async { done(false, false, "בוטל") }; return }
         let o = lastJSONObject(r.out, key: "html") ?? [:]
         var html = (try? String(contentsOf: tmp, encoding: .utf8)) ?? ""
         try? FileManager.default.removeItem(at: tmp)
         let usedClaude = o["claude"] as? Bool ?? false
         var note = o["error"] as? String
         let contact = o["footer"] as? String ?? ""
+        // סקיל PDF שמייצר PDF בעצמו: הקובץ כבר מוכן (מהסקריפט של הסקיל). רק מוסיפים את שורת טימי בסוף
+        if let p = o["pdf"] as? String, !p.isEmpty, FileManager.default.fileExists(atPath: p) {
+            let fm = FileManager.default
+            try? fm.removeItem(at: dest)
+            let moved = (try? fm.moveItem(at: URL(fileURLWithPath: p), to: dest)) != nil || (try? fm.copyItem(at: URL(fileURLWithPath: p), to: dest)) != nil
+            try? fm.removeItem(atPath: p)
+            DispatchQueue.main.async {
+                if moved { stampFooter(dest, contact: "", pageNumbers: false) }
+                done(moved, usedClaude, note)
+            }
+            return
+        }
+        // הסקיל לא הצליח: יוצא ה-PDF הרגיל של טימי, עם הסבר קצר
+        if o["skill_failed"] as? Bool == true { note = "לא הצלחתי להפעיל את הסקיל \(o["skill"] as? String ?? ""), אז הכנתי את ה-PDF בעיצוב הרגיל של טימי." }
         if html.isEmpty {
             html = swiftFallbackHTML((try? String(contentsOf: md, encoding: .utf8)) ?? "")
-            note = note ?? "pdf.py לא רץ"
+            // הסקיל היה אמור לייצר את ה-PDF: אומרים למשתמש למה הוא מקבל עיצוב פשוט
+            note = viaSkill.map { "לא הצלחתי להפעיל את הסקיל \($0), אז הכנתי את ה-PDF בעיצוב הרגיל של טימי." } ?? note ?? "pdf.py לא רץ"
         }
         html = injectTimmyFooter(html)   // תמיד, בכל מסלול (Claude / מקומי / גיבוי / תצוגה מקדימה)
         DispatchQueue.main.async {
@@ -4664,6 +5996,7 @@ final class CallsModel: ObservableObject {
     @Published var summaryModelID = summaryModel
     @Published var bulletsModelID = configModel("bullets_model", "haiku")
     @Published var pdf: [String: PDFState] = [:]
+    @Published var pdfNote: [String: String] = [:]   // הסבר קצר ליד ה-PDF (למשל: הסקיל לא רץ, יצא העיצוב הרגיל)
     @Published var wa: WAState = .unknown
     enum Link: Equatable { case idle, waiting, failed(String) }
     @Published var link: Link = .idle
@@ -4798,8 +6131,10 @@ final class CallsModel: ObservableObject {
     func makePDF(_ c: CallItem) {
         if pdf[c.id] == .working { return }
         pdf[c.id] = .working
-        buildPDF(md: c.url, dest: c.pdfURL) { [weak self] ok, claude, _ in
+        pdfNote[c.id] = nil
+        buildPDF(md: c.url, dest: c.pdfURL) { [weak self] ok, claude, note in
             guard let self else { return }
+            if let note, note.hasPrefix("לא הצלחתי להפעיל את הסקיל") { self.pdfNote[c.id] = note }
             if ok { self.pdf[c.id] = .done(c.pdfURL, claude); revealInFinder(c.pdfURL) }
             else { self.pdf[c.id] = .failed("לא הצלחתי ליצור PDF") }
         }
@@ -5112,6 +6447,9 @@ struct CallDetailHeader: View {
             }
             CallActions(m: m, c: c).padding(.top, 4)
             PDFStatusLine(state: m.pdf[c.id])
+            if let n = m.pdfNote[c.id], m.pdf[c.id] != .working {
+                Text(he(n)).font(.system(size: 12)).foregroundColor(ink.opacity(0.6)).fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
@@ -5187,12 +6525,20 @@ struct ActionButton: View {
 }
 struct PDFStatusLine: View {
     let state: CallsModel.PDFState?
+    @State private var via: String?   // הסקיל שמייצר את ה-PDF (נקרא מהדיסק ברקע, לא בכל ציור)
     var body: some View {
         switch state {
         case .working?:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text(he("מכין PDF… (Claude מעצב את המסמך, עד שתי דקות)")).font(.system(size: 12.5)).foregroundColor(ink.opacity(0.65))
+                Text(he(via.map { "מכין PDF… (לפי הסקיל \($0), עד שלוש דקות)" } ?? "מכין PDF… (Claude מעצב את המסמך, עד שלוש דקות)"))
+                    .font(.system(size: 12.5)).foregroundColor(ink.opacity(0.65))
+            }
+            .onAppear {
+                DispatchQueue.global().async {
+                    let v = skillRunsPDF() ? linkedSkill("pdf")?.name : nil
+                    DispatchQueue.main.async { via = v }
+                }
             }
         case .done(let u, let claude)?:
             HStack(spacing: 8) {
@@ -5723,6 +7069,7 @@ struct ChatMsg: Codable, Identifiable, Equatable {
     var pdf: String? = nil
     var isError = false
     var ctx: String? = nil     // הקשר נסתר לפרומפט (למשל המראה לפני ואחרי שינוי), לא מוצג
+    var files: [String]? = nil // קבצים שצורפו להודעה (דוגמאות כתיבה, PDF ליצירת סקיל)
 }
 
 let pdfDesignDir = appDir.appendingPathComponent("pdf")
@@ -5740,22 +7087,36 @@ final class PDFDesignModel: ObservableObject {
     @Published var pendingLogo: URL?
     @Published var busy: String?
     @Published var skillName: String?   // סקיל ה-PDF המחובר (שבב בראש החלון)
+    @Published var skillRuns = false    // ה-PDF-ים יוצאים מהסקריפט של הסקיל עצמו (לא מהתבנית של טימי)
+    @Published var cancelAction: (() -> Void)?   // כפתור "בטל" בבועת ההמתנה (יצירת סקיל)
+    @Published var candidates: [SkillInfo] = []  // סקילי PDF במחשב (לתפריט "יש לי כבר סקיל PDF"), נטען ברקע
     private var queue: [(String, URL?)] = []
     private var loaded = false
     let chatFile = pdfDesignDir.appendingPathComponent("chat.json")
     let previews = pdfDesignDir.appendingPathComponent("previews")
     init() {
-        NotificationCenter.default.addObserver(forName: skillsChanged, object: nil, queue: .main) { [weak self] _ in self?.skillName = linkedSkill("pdf")?.name }
+        NotificationCenter.default.addObserver(forName: skillsChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.skillName = linkedSkill("pdf")?.name; self?.skillRuns = skillRunsPDF(); self?.refreshCandidates()
+        }
+    }
+    func refreshCandidates() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let list = pdfSkillCandidates()
+            DispatchQueue.main.async { self.candidates = list }
+        }
     }
 
-    func load() {
+    // quiet: החלון נפתח כדי לחבר סקיל או ליצור סקיל, אז לא מראים קודם "ככה ה-PDF נראה עכשיו" בעיצוב הישן
+    func load(quiet: Bool = false) {
         skillName = linkedSkill("pdf")?.name
+        skillRuns = skillRunsPDF()
+        refreshCandidates()
         guard !loaded else { return }
         loaded = true
         if let d = try? Data(contentsOf: chatFile), let m = try? JSONDecoder().decode([ChatMsg].self, from: d) { msgs = m }
         if msgs.isEmpty {
             msgs = [ChatMsg(fromUser: false, text: "אני מעצב את ה-PDF שאתה שולח ללקוחות. תכתוב לי מה לשנות, במילים שלך. למשל:\n• שם העסק: סטודיו דנה\n• תשים את הלוגו שלי למעלה (צרף אותו עם 📎)\n• יותר מינימליסטי, בכחול\n• בתחתית: 050-1234567 · studio.co.il\n• המשימות בטבלה")]
-            preview(caption: "ככה ה-PDF נראה עכשיו:", local: true)   // פתיחה ראשונה: מהר, בלי Claude
+            if !quiet { preview(caption: "ככה ה-PDF נראה עכשיו:", local: true) }   // פתיחה ראשונה: מהר, בלי Claude
         }
     }
     private func save() {
@@ -5780,16 +7141,17 @@ final class PDFDesignModel: ObservableObject {
         do { try FileManager.default.copyItem(at: u, to: dest); return dest } catch { return nil }
     }
 
-    func send(_ text: String? = nil, logo: URL? = nil) {
+    // silent: בקשה שטימי שולח בעצמו (למשל "תעצב לפי הסקיל" כשאין לסקיל סקריפט). לא מוצגת כאילו המשתמש כתב אותה
+    func send(_ text: String? = nil, logo: URL? = nil, silent: Bool = false) {
         var t = (text ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
         let lg = logo ?? (text == nil ? pendingLogo : nil)
         if t.isEmpty && lg == nil { return }
         if text == nil { input = ""; pendingLogo = nil }
-        if busy != nil { queue.append((t, lg)); return }
+        if busy != nil { queue.append(((silent ? "__silent__" : "") + t, lg)); return }
         if t.isEmpty { t = "הנה הלוגו שלי, תשים אותו בראש המסמך" }
         // ההיסטוריה (בלי ההודעה החדשה) עוברת ל-pdf.py כדי ש"עוד יותר כהה" / "תחזיר את הכחול" יובנו לפי ההקשר
         let hist = writeHistory(msgs)
-        add(ChatMsg(fromUser: true, text: t, image: lg?.path))
+        if !silent { add(ChatMsg(fromUser: true, text: t, image: lg?.path)) }
         var args = [pdfScript, "--design", t]
         if let lg { args += ["--logo", lg.path] }
         if let hist { args += ["--history", hist.path] }
@@ -5836,23 +7198,142 @@ final class PDFDesignModel: ObservableObject {
             }
         }
     }
-    private func next() { if !queue.isEmpty { let (t, l) = queue.removeFirst(); send(t, logo: l) } }
+    private func next() {
+        guard !queue.isEmpty else { return }
+        let (t, l) = queue.removeFirst()
+        if t.hasPrefix("__adopt__") {
+            // "__adopt__<נתיב>\u{1}<הוראה נוספת>": ההוראה שנשלחה יחד עם החיבור לא הולכת לאיבוד כשהחלון היה עסוק
+            let parts = String(t.dropFirst(9)).components(separatedBy: "\u{1}")
+            let extra = parts.count > 1 && !parts[1].isEmpty ? parts[1] : nil
+            if let sk = readSkill(URL(fileURLWithPath: parts[0]), source: "") { adoptSkill(sk, then: extra) } else { next() }
+        } else if t.hasPrefix("__create__") {
+            createSkill(from: URL(fileURLWithPath: String(t.dropFirst(10))))
+        } else if t.hasPrefix("__silent__") {
+            send(String(t.dropFirst(10)), logo: l, silent: true)
+        } else { send(t, logo: l) }
+    }
+
+    // MARK: סקילים: יצירת סקיל עיצוב מ-PDF לדוגמה, ושימוש בסקיל PDF שכבר יש בקלוד קוד
+    func pickPDFForSkill() {
+        let p = NSOpenPanel()
+        p.allowedContentTypes = [.pdf]
+        p.allowsMultipleSelection = false; p.canChooseDirectories = false
+        p.message = "בחר PDF שאתה אוהב את העיצוב שלו (מסמך מותג, הצעת מחיר ישנה, מצגת). אני אבנה ממנו סקיל עיצוב."
+        p.prompt = "צור סקיל"
+        NSApp.activate(ignoringOtherApps: true)
+        if p.runModal() == .OK, let u = p.url { createSkill(from: u) }
+    }
+    // גרירה לחלון: PDF = סקיל עיצוב חדש, תמונה = לוגו
+    func handleDrop(_ urls: [URL]) {
+        if let pdf = urls.first(where: { $0.pathExtension.lowercased() == "pdf" }) { createSkill(from: pdf); return }
+        if let img = urls.first(where: { ["png", "jpg", "jpeg", "gif", "webp", "svg"].contains($0.pathExtension.lowercased()) }) { pendingLogo = copyLogo(img); return }
+        if !urls.isEmpty { add(ChatMsg(fromUser: false, text: "אפשר לגרור לכאן PDF (ואני אבנה ממנו סקיל עיצוב) או תמונה של הלוגו.", isError: true)) }
+    }
+    func createSkill(from url: URL) {
+        if busy != nil { queue.append(("__create__" + url.path, nil)); return }   // מתחיל כשמה שרץ עכשיו (למשל תצוגה מקדימה) מסתיים
+        let thumb = previews.appendingPathComponent("source-\(Int(Date().timeIntervalSince1970 * 1000)).png")
+        try? FileManager.default.createDirectory(at: previews, withIntermediateDirectories: true)
+        let hasThumb = pdfFirstPagePNG(url, to: thumb, width: 300)
+        add(ChatMsg(fromUser: true, text: "תבנה סקיל עיצוב מהקובץ \u{2066}\(url.lastPathComponent)\u{2069}", image: hasThumb ? thumb.path : nil))
+        let token = CancelToken()
+        busy = "קורא את ה-PDF…"
+        cancelAction = { [weak self] in token.cancel(); self?.busy = "מבטל…" }
+        DispatchQueue.global().async {
+            let res = createPDFSkill(from: url, token: token) { msg in DispatchQueue.main.async { if !token.isCancelled { self.busy = msg } } }
+            DispatchQueue.main.async {
+                self.cancelAction = nil; self.busy = nil
+                switch res {
+                case .cancelled:
+                    self.add(ChatMsg(fromUser: false, text: "ביטלתי. לא נוצר סקיל ולא שיניתי כלום."))
+                    demoFinished(["flow": "pdf-skill", "ok": false, "cancelled": true]); self.next()
+                case .failed(let why):
+                    self.add(ChatMsg(fromUser: false, text: why, isError: true))
+                    demoFinished(["flow": "pdf-skill", "ok": false, "error": why]); self.next()
+                case .ok(let info, let summary):
+                    let learned = summary.isEmpty ? "" : summary + "\n\n"
+                    self.add(ChatMsg(fromUser: false, text: learned + "שמרתי את זה כסקיל חדש של Claude בשם \u{2066}\(info.name)\u{2069}, כך שגם Claude Code יכול לעצב לפיו. חיברתי אותו לטימי."))
+                    setLinkedSkill("pdf", info)
+                    self.adoptSkill(info, created: true)
+                }
+            }
+        }
+    }
+    // סקיל PDF שחובר: אם יש לו צינור משלו (סקריפט), ה-PDF-ים יוצאים ממנו. אחרת: מעצבים את התבנית של טימי לפי ההוראות שלו
+    func adoptSkill(_ s: SkillInfo, created: Bool = false, then extra: String? = nil) {
+        if busy != nil {
+            // תצוגה מקדימה של העיצוב הישן שעוד לא התחילה לא רלוונטית יותר: הסקיל יראה תצוגה משלו
+            queue.append(("__adopt__" + s.dir.path + (extra.map { "\u{1}" + $0 } ?? ""), nil)); return
+        }
+        busy = "בודק איך הסקיל \(s.name) מייצר PDF…"
+        let token = CancelToken()
+        cancelAction = { [weak self] in token.cancel(); self?.busy = "מבטל…" }
+        DispatchQueue.global().async {
+            _ = linkedSkill("pdf")
+            // pdf.py מסיים תוך כ-3 דקות לכל היותר (תקציב פנימי); "בטל" עוצר מיד, כולל מה שהוא הפעיל
+            let r = runProcess(python, [pdfScript, "--skill-setup"], timeout: 200, token: token)
+            let o = lastJSONObject(r.out, key: "ok") ?? [:]
+            DispatchQueue.main.async {
+                self.busy = nil; self.cancelAction = nil
+                if r.cancelled || token.isCancelled {
+                    // ביטול: לא משאירים חצי חיבור. הסקיל מתנתק, וה-PDF ממשיך לצאת כמו קודם
+                    if linkedSkill("pdf")?.path == s.dir.path { setLinkedSkill("pdf", nil) }
+                    self.skillName = linkedSkill("pdf")?.name; self.skillRuns = skillRunsPDF()
+                    self.add(ChatMsg(fromUser: false, text: "ביטלתי. לא חיברתי את הסקיל \u{2066}\(s.name)\u{2069}, וה-PDF נשאר כמו שהיה." + (created ? " הסקיל עצמו שמור בקלוד קוד, ואפשר לחבר אותו מתי שתרצה." : "")))
+                    demoFinished(["flow": created ? "pdf-skill" : "adopt", "ok": false, "cancelled": true, "skill": s.name])
+                    self.next(); return
+                }
+                self.skillRuns = skillRunsPDF()
+                if o["runner"] as? Bool == true {
+                    let cap = created ? "מעכשיו כל ה-PDF-ים שלי יוצאים בעיצוב הזה. ככה סיכום שיחה נראה בו:"
+                                      : "מעכשיו כל ה-PDF-ים יוצאים מהסקיל \u{2066}\(s.name)\u{2069} עצמו, בדיוק כמו כשהוא רץ בקלוד קוד. ככה סיכום שיחה נראה:"
+                    self.preview(caption: cap) { pdf in
+                        demoFinished(["flow": created ? "pdf-skill" : "adopt", "ok": true, "runner": true, "skill": s.name, "path": s.dir.path, "preview": pdf ?? ""])
+                    }
+                    if let extra { self.queue.append((extra, nil)) }
+                } else {
+                    if o["ok"] as? Bool != true && r.timedOut {
+                        self.add(ChatMsg(fromUser: false, text: "לקח לי יותר מדי זמן לבדוק את הסקיל, אז אני מעצב את התבנית שלי לפי ההוראות שלו."))
+                    } else if let why = o["reason"] as? String, !why.isEmpty {
+                        self.add(ChatMsg(fromUser: false, text: "ניסיתי להריץ את הסקריפט של הסקיל \u{2066}\(s.name)\u{2069} ולא הצלחתי (\(why.components(separatedBy: ":").first ?? why)), אז אני מעצב את התבנית שלי לפי ההוראות שלו."))
+                    } else if !created {
+                        self.add(ChatMsg(fromUser: false, text: "לסקיל \u{2066}\(s.name)\u{2069} אין סקריפט שאני יכול להריץ כדי לייצר PDF, אז אני מעצב את התבנית שלי לפי ההוראות שלו."))
+                    } else {
+                        self.add(ChatMsg(fromUser: false, text: "אני מעצב עכשיו את ה-PDF לפי הסקיל החדש \u{2066}\(s.name)\u{2069}."))
+                    }
+                    // הבקשה הזאת יוצאת מטימי, לא מהמשתמש: לא מציגים אותה כבועה שלו
+                    self.send("תעצב את ה-PDF בדיוק כמו בסקיל \(s.name)" + (extra.map { ". וגם: " + $0 } ?? ""), silent: true)
+                    demoFinished(["flow": created ? "pdf-skill" : "adopt", "ok": true, "runner": false, "skill": s.name, "path": s.dir.path])
+                }
+            }
+        }
+    }
 
     // תצוגה מקדימה: השיחה האחרונה (או שיחה לדוגמה), עמוד 1 כתמונה בצ'אט
-    func preview(caption: String, local: Bool = false) {
-        busy = "מכין תצוגה מקדימה…"
+    func preview(caption: String, local: Bool = false, done: ((String?) -> Void)? = nil) {
+        busy = skillRuns ? "מכין תצוגה מקדימה מהסקיל…" : "מכין תצוגה מקדימה…"
+        let token = CancelToken()
+        if !local { cancelAction = { [weak self] in token.cancel(); self?.busy = "מבטל…" } }
         let sample = appDir.appendingPathComponent("pdf_sample.md")
         guard let md = listCalls().first?.url ?? (FileManager.default.fileExists(atPath: sample.path) ? sample : nil) else {
-            add(ChatMsg(fromUser: false, text: caption)); busy = nil; next(); return
+            add(ChatMsg(fromUser: false, text: caption)); busy = nil; cancelAction = nil; done?(nil); next(); return
         }
         try? FileManager.default.createDirectory(at: previews, withIntermediateDirectories: true)
         let stamp = Int(Date().timeIntervalSince1970 * 1000)
         let pdf = previews.appendingPathComponent("preview-\(stamp).pdf"), png = previews.appendingPathComponent("preview-\(stamp).png")
-        buildPDF(md: md, dest: pdf, local: local, preview: true) { ok, _, _ in
+        buildPDF(md: md, dest: pdf, local: local, preview: true, token: token) { ok, _, note in
+            self.cancelAction = nil
+            if token.isCancelled {
+                self.add(ChatMsg(fromUser: false, text: caption + "\n(עצרתי את התצוגה המקדימה. השינוי נשמר, ותראה אותו ב-PDF הבא)"))
+                done?(nil); self.busy = nil; self.next(); return
+            }
+            var cap = caption
+            if let note, note.hasPrefix("לא הצלחתי להפעיל את הסקיל") { cap += "\n(" + note + ")" }
             if ok && pdfFirstPagePNG(pdf, to: png) {
-                self.add(ChatMsg(fromUser: false, text: caption, image: png.path, pdf: pdf.path))
+                self.add(ChatMsg(fromUser: false, text: cap, image: png.path, pdf: pdf.path))
+                done?(pdf.path)
             } else {
-                self.add(ChatMsg(fromUser: false, text: caption + "\n(לא הצלחתי להכין תצוגה מקדימה)"))
+                self.add(ChatMsg(fromUser: false, text: cap + "\n(לא הצלחתי להכין תצוגה מקדימה)"))
+                done?(nil)
             }
             self.busy = nil; self.next()
         }
@@ -5871,15 +7352,20 @@ struct PDFDesignView: View {
                     Text(he("עיצוב ה-PDF")).font(.system(size: 24, weight: .bold)).foregroundColor(ink)
                     Text(he("תכתוב מה לשנות, ואני אראה לך איך זה נראה. כל ה-PDF-ים הבאים ייצאו ככה."))
                         .font(.system(size: 13)).foregroundColor(ink.opacity(0.6))
-                    if let s = m.skillName { SkillChip(name: s).padding(.top, 2) }
+                    if let s = m.skillName { SkillChip(name: s, runs: m.skillRuns).padding(.top, 2) }
                 }
             }
             .padding(.top, 44)
+            PDFSkillButtons(m: m)
             ChatScroll(m: m)
             ChatControls(m: m)
             HStack { Spacer(); CreatorBadge(); Spacer() }
         }
         .padding(.horizontal, 36).padding(.bottom, 20)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            loadDroppedURLs(providers) { m.handleDrop($0) }
+            return true
+        }
         .frame(minWidth: 640, maxWidth: .infinity, minHeight: 760, maxHeight: .infinity)
         .background(bgColor)
         .environment(\.layoutDirection, .rightToLeft)
@@ -5895,7 +7381,7 @@ struct ChatScroll: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     ForEach(m.msgs) { msg in ChatBubble(msg: msg) }
-                    if let b = m.busy { TypingBubble(text: b) }
+                    if let b = m.busy { TypingBubble(text: b, cancel: m.cancelAction) }
                     Color.clear.frame(height: 1).id("end")
                 }
                 .padding(.vertical, 6)
@@ -5951,12 +7437,19 @@ struct ChatImage: View {
 }
 struct TypingBubble: View {
     let text: String
+    var cancel: (() -> Void)? = nil
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             TimmyAvatar()
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text(he(text)).font(.system(size: 13.5)).foregroundColor(ink.opacity(0.6))
+                if let cancel {
+                    Button(action: cancel) {
+                        Text(he("בטל")).font(.system(size: 12, weight: .semibold)).foregroundColor(ink.opacity(0.75))
+                            .padding(.vertical, 3).padding(.horizontal, 10).background(Capsule().fill(ink.opacity(0.1)))
+                    }.buttonStyle(.plain).help("לעצור באמצע. שום דבר לא יישמר")
+                }
             }
             .padding(.vertical, 10).padding(.horizontal, 14)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(ink.opacity(0.06)))
@@ -5990,13 +7483,73 @@ struct ChatControls: View {
         }
     }
 }
-// "מעוצב לפי הסקיל: X" בראש חלון עיצוב ה-PDF
+// כפתורי סקילים בחלון עיצוב ה-PDF: יצירת סקיל מקובץ, ושימוש בסקיל PDF שכבר יש בקלוד קוד
+struct PDFSkillButtons: View {
+    @ObservedObject var m: PDFDesignModel
+    var body: some View {
+        HStack(spacing: 8) {
+            SmallChip(title: "צור סקיל עיצוב מקובץ PDF", icon: "doc.badge.plus") { m.pickPDFForSkill() }
+                .help("בחר PDF שאתה אוהב את העיצוב שלו, ואבנה ממנו סקיל. אפשר גם לגרור PDF לחלון")
+            Menu {
+                let list = m.candidates
+                if list.isEmpty {
+                    Text(he("לא מצאתי במחשב סקיל שמייצר PDF"))
+                } else {
+                    Section(he("הסקילים שלך בקלוד קוד")) {
+                        ForEach(list, id: \.dir) { sk in
+                            Button(skillMenuTitle(sk, linked: sk.name == m.skillName)) {
+                                if sk.name != m.skillName { setLinkedSkill("pdf", sk); m.skillName = sk.name; m.adoptSkill(sk) }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "wand.and.stars").font(.system(size: 10.5, weight: .semibold))
+                    Text(he("יש לי כבר סקיל PDF")).font(.system(size: 12))
+                }
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
+            .foregroundColor(ink.opacity(0.7))
+            .padding(.vertical, 3).padding(.horizontal, 9).background(Capsule().fill(ink.opacity(0.07)))
+            .help("טימי ישתמש בסקיל שלך כמו שהוא: ה-PDF-ים ייצאו בדיוק כמו בקלוד קוד")
+            Spacer()
+        }
+        .disabled(m.busy != nil).opacity(m.busy != nil ? 0.5 : 1)
+    }
+}
+// שורה בתפריט הסקילים: השם (✓ למחובר עכשיו), ותיאור רק אם הוא בעברית (תיאור באנגלית חתוך באמצע לא עוזר)
+func skillMenuTitle(_ s: SkillInfo, linked: Bool) -> String {
+    var t = (linked ? "✓ " : "") + s.name
+    let d = s.description.trimmingCharacters(in: .whitespacesAndNewlines)
+    if d.range(of: "\\p{Hebrew}", options: .regularExpression) != nil {
+        let short = d.count > 45 ? String(d.prefix(45)).trimmingCharacters(in: .whitespaces) + "…" : d
+        t += "  ·  " + short
+    }
+    if linked { t += "  (מחובר עכשיו)" }
+    return t
+}
+// גרירת קבצים: הכתובות מהגרירה (על ה-main thread)
+func loadDroppedURLs(_ providers: [NSItemProvider], done: @escaping ([URL]) -> Void) {
+    var urls: [URL] = []
+    let g = DispatchGroup(), lock = NSLock()
+    for p in providers where p.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+        g.enter()
+        _ = p.loadObject(ofClass: URL.self) { u, _ in
+            if let u { lock.lock(); urls.append(u); lock.unlock() }
+            g.leave()
+        }
+    }
+    g.notify(queue: .main) { done(urls) }
+}
+// "מעוצב לפי הסקיל: X" / "ה-PDF יוצא מהסקיל: X" בראש חלון עיצוב ה-PDF
 struct SkillChip: View {
     let name: String
+    var runs = false
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: "wand.and.stars").font(.system(size: 10.5, weight: .semibold))
-            Text(he("מעוצב לפי הסקיל:")).font(.system(size: 12))
+            Text(he(runs ? "ה-PDF יוצא מהסקיל:" : "מעוצב לפי הסקיל:")).font(.system(size: 12))
             Text(name).font(.system(size: 12, weight: .semibold)).environment(\.layoutDirection, .leftToRight)
         }
         .foregroundColor(amber)

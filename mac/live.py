@@ -35,11 +35,20 @@ def custom_block(kind):
     return (f"\n\nהעדפות אישיות של {OWNER} (חלקן לנקודות וחלקן לסיכום הסופי). החל רק את מה שנוגע לנקודות עצמן: אורך, סגנון, ניסוח, אימוג'י, מה להדגיש. "
             "התעלם מהוראות על מבנה הסיכום הסופי (טבלאות, סעיפים, הודעות וואטסאפ, מספור). בכל מקרה הפלט נשאר רק שורות שמתחילות ב-\"- \":\n"
             + "\n".join("- " + c for c in CUSTOM))
+def _desktop_claude():
+    """Claude Code שבתוך אפליקציית Claude (הלשונית Code). התיקייה מתחלפת בכל עדכון של האפליקציה, החדשה קודם"""
+    import glob, re
+    base = os.path.expanduser("~/Library/Application Support/Claude/claude-code")
+    def ver(p):
+        m = re.search(r"claude-code/(\d+)\.(\d+)\.(\d+)/", p)
+        return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+    return sorted(glob.glob(base + "/*/*/claude.app/Contents/MacOS/claude"), key=ver, reverse=True)
 def _claude_path():
     import shutil, glob
     cands = [CFG.get("claude_path") or "", shutil.which("claude") or "",
              os.path.expanduser("~/.claude/local/claude"), os.path.expanduser("~/.local/bin/claude"),
-             "/opt/homebrew/bin/claude", "/usr/local/bin/claude"] + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/claude")), reverse=True)
+             "/opt/homebrew/bin/claude", "/usr/local/bin/claude"] + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/claude")), reverse=True) \
+            + _desktop_claude()
     return next((c for c in cands if c and os.path.exists(c)), "")
 RESTYLE_PROMPT = """לפניך מסמך סיכום של שיחה (Markdown) ואת התמלול המלא של השיחה.
 {owner} ביקש שהסיכומים שלו ייכתבו לפי ההוראות האלה:
@@ -216,7 +225,8 @@ def find_claude():
     import shutil, glob
     cands = [CFG.get("claude_path") or "", shutil.which("claude") or "",
              os.path.expanduser("~/.claude/local/claude"), os.path.expanduser("~/.local/bin/claude"),
-             "/opt/homebrew/bin/claude", "/usr/local/bin/claude"] + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/claude")), reverse=True)
+             "/opt/homebrew/bin/claude", "/usr/local/bin/claude"] + sorted(glob.glob(os.path.expanduser("~/.nvm/versions/node/*/bin/claude")), reverse=True) \
+            + _desktop_claude()
     return next((c for c in cands if c and os.path.exists(c)), "")
 CLAUDE = find_claude()   # בלי Claude Code: רק תמלול, בלי בולטים וסיכום
 entries = []   # (start_sec, speaker, text)
