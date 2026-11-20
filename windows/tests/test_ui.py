@@ -151,6 +151,7 @@ def test_calls_window_screens(qapp, screens, calls_folder, monkeypatch):
     w.select(w.calls[1].id)
     assert "דנה כהן" in w.selected().person
     assert "החלטות" in w.summary.toPlainText() and "# " not in w.summary.toPlainText()
+    wait_until(qapp, lambda: False, 0.4)          # let the header relayout settle (else the shot catches a cut title)
     save_shot(w, screens / "calls-dark-with-person.png")
     w.search.setText("מעקב")
     assert w.list.count() == 1
