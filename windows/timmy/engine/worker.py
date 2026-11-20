@@ -265,7 +265,12 @@ class Chan:
             self.s.emit({"type": "partial", "text": "", "speaker": "me"})
             return
         if self.s.profile == "cpu":
-            self.s.enqueue(self.ch, np.array(a, np.float32), at)
+            # several utterances share one Whisper call in this profile, and a piece with seconds of silence inside
+            # it made Whisper stop early: the next utterance in the batch came back empty and was lost (seen on
+            # windows-latest after a slow model load, when the whole backlog arrives at once). Each stretch of speech
+            # is queued on its own, trimmed, with its own timestamp.
+            for s0, e0 in speech_runs(a, L.TH[self.ch]):
+                self.s.enqueue(self.ch, np.array(a[s0:e0], np.float32), at + s0)
             return
         t, _, info = self.s.tr(a)
         self.line(t, info, at)
@@ -341,6 +346,31 @@ class Chan:
             else:
                 self.s.emit({"type": "partial", "text": "", "thinking": True, "speaker": self.sp})
             self.last_partial = time.time()
+
+
+def speech_runs(a, th, gap_s=0.6, pad_before_s=0.2, pad_after_s=0.3):
+    """[(start, end)] sample ranges of the speech in `a`: frames above `th`, split where the silence lasts `gap_s` or
+    more (the live segmentation's own rule), padded a little on both sides. Nothing above `th`: no range (a silent
+    leftover at the end of a call is not sent to Whisper, where silence can come back as an invented sentence)."""
+    rms = L.speech_frames(a)
+    idx = np.flatnonzero(rms > th)
+    if not len(idx):
+        return []
+    gap = max(1, int(round(gap_s * SR / L.FR)))
+    runs, first, last = [], int(idx[0]), int(idx[0])
+    for i in idx[1:]:
+        i = int(i)
+        if i - last > gap:
+            runs.append((first, last))
+            first = i
+        last = i
+    runs.append((first, last))
+    out = []
+    for f, l_ in runs:
+        s0 = max(0, f * L.FR - int(pad_before_s * SR))
+        e0 = min(len(a), (l_ + 1) * L.FR + int(pad_after_s * SR))
+        out.append((s0, e0))
+    return out
 
 
 class Session:
@@ -481,6 +511,17 @@ class Session:
         except Exception:
             log(event="asr_error", error=traceback.format_exc(limit=3))
             groups = [[] for _ in items]
+        if len(items) > 1:
+            # Whisper sometimes skips a piece of a merged call (seen with the same sentence twice in one batch, on
+            # windows-latest after a slow model load): a piece that came back without text gets a call of its own,
+            # so batching never loses a line
+            for i, ((a, at), g) in enumerate(zip(items, groups)):
+                if not any(str(x.get("text") or "").strip() for x in g):
+                    try:
+                        groups[i] = list(self.asr.segments(a))
+                        log(event="asr_retry", at=round(at / SR, 2), found=bool(groups[i]))
+                    except Exception:
+                        log(event="asr_error", error=traceback.format_exc(limit=3))
         for (_a, at), g in zip(items, groups):
             t, _, info = A.segments_info(g)
             try:

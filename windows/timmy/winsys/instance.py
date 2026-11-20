@@ -33,6 +33,8 @@ def send_to_running(message: str = "show", name: str | None = None, timeout_ms: 
     s.flush()
     s.waitForBytesWritten(timeout_ms)
     s.disconnectFromServer()
+    if s.state() != QLocalSocket.LocalSocketState.UnconnectedState:
+        s.waitForDisconnected(timeout_ms)
     return True
 
 
@@ -45,6 +47,7 @@ class SingleInstance(QObject):
         self.name = name or server_name()
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self._accept)
+        self._bufs: dict[int, bytes] = {}
 
     def listen(self) -> bool:
         if send_to_running("ping", self.name):
@@ -57,17 +60,51 @@ class SingleInstance(QObject):
         return True
 
     def _accept(self):
+        # On Windows (named pipe) the second Timmy writes its line and disconnects at once: the bytes can already be
+        # waiting when the connection is accepted (no readyRead follows) or arrive together with the disconnect. So
+        # read on accept, on readyRead and on disconnect (windows-latest: the "show" of a second launch was lost).
+        # The slots are bound methods using sender(): no lambda keeps a socket wrapper alive past its C++ object.
         while self.server.hasPendingConnections():
             c = self.server.nextPendingConnection()
-            c.readyRead.connect(lambda c=c: self._read(c))
-            c.disconnected.connect(c.deleteLater)
+            if c is None:
+                break
+            self._bufs[id(c)] = b""
+            c.readyRead.connect(self._on_ready)
+            c.disconnected.connect(self._on_gone)
+            self._drain(c)
+            if c.state() == QLocalSocket.LocalSocketState.UnconnectedState:
+                self._done(c)
 
-    def _read(self, c):
-        data = bytes(c.readAll()).decode("utf-8", "replace")
-        for line in data.splitlines():
-            line = line.strip()
-            if line and line != "ping":
-                self.message.emit(line)
+    def _on_ready(self):
+        c = self.sender()
+        if isinstance(c, QLocalSocket):
+            self._drain(c)
+
+    def _on_gone(self):
+        c = self.sender()
+        if isinstance(c, QLocalSocket):
+            self._done(c)
+
+    def _drain(self, c):
+        buf = self._bufs.get(id(c), b"") + bytes(c.readAll())
+        *lines, rest = buf.split(b"\n")
+        self._bufs[id(c)] = rest
+        for raw in lines:
+            self._emit(raw)
+
+    def _done(self, c):
+        if id(c) not in self._bufs:
+            return
+        self._drain(c)
+        rest = self._bufs.pop(id(c), b"")
+        if rest:
+            self._emit(rest)
+        c.deleteLater()
+
+    def _emit(self, raw: bytes):
+        line = raw.decode("utf-8", "replace").strip()
+        if line and line != "ping":
+            self.message.emit(line)
 
     def close(self):
         self.server.close()

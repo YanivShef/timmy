@@ -205,6 +205,47 @@ def test_cpu_profile_merges_without_losing_lines(tmp_path, cfg_default):
     assert secs == sorted(secs)                               # per channel in time order
 
 
+class SkippingASR(LenASR):
+    """Like Whisper on windows-latest: in a merged call (timestamps on) it returns nothing for the last piece."""
+
+    def segments(self, a, partial=False, timestamps=False):
+        out = super().segments(a, partial, timestamps)
+        return out[:-1] if timestamps and len(out) > 1 else out
+
+
+def test_speech_runs_split_trim_and_skip_silence():
+    a = noise_track([(1.0, 2.0), (6.0, 1.5)], seed=5)          # 2 s, 3 s of silence, 1.5 s
+    runs = W.speech_runs(a, L.TH[0])
+    assert len(runs) == 2
+    (s0, e0), (s1, e1) = runs
+    assert abs(s0 / SR - 0.8) < 0.11 and abs(e0 / SR - 3.3) < 0.11 and abs(s1 / SR - 5.8) < 0.11
+    assert W.speech_runs(np.zeros(3 * SR, np.float32), L.TH[0]) == []
+    short_gap = noise_track([(1.0, 1.0), (2.3, 1.0)], seed=6)   # 0.3 s pause: one utterance
+    assert len(W.speech_runs(short_gap, L.TH[0])) == 1
+
+
+def test_cpu_profile_backlog_and_skipped_pieces_lose_nothing(tmp_path, cfg_default):
+    """The whole call arrives in one step (the model took longer to load than the call lasted), and the backend
+    skips a piece of every merged call: still every utterance becomes its own line, at its own time."""
+    ch0 = noise_track([(0.5, 3.0), (15.0, 3.0)], seed=7)
+    ch1 = noise_track([(8.0, 2.5), (22.0, 2.5)], seed=8, amp=0.1)
+    n = max(len(ch0), len(ch1))
+    ch0, ch1 = np.pad(ch0, (0, n - len(ch0))), np.pad(ch1, (0, n - len(ch1)))
+    reset_echo()
+    asr = SkippingASR(delay=0.02)
+    s = W.Session(str(tmp_path / "d"), {}, W.Emitter(io.StringIO()), asr=asr, profile="cpu")
+    s.begin(bullets=False)
+    s.step_all({0: [ch0], 1: [ch1]}, True)
+    with s.qcv:
+        s.q_closed = True
+        s.qcv.notify_all()
+    s.asr_thread.join(30)
+    s.txt.close()
+    assert any(ts for _n, _p, ts in asr.calls), "nothing was merged"
+    got = sorted((int(sec), ch) for sec, ch, _ in s.entries)
+    assert got == [(0, 0), (7, 1), (14, 0), (21, 1)], got
+
+
 def test_cpu_profile_echo_check_happens_before_the_queue(tmp_path, cfg_default):
     ch0, ch1 = call_audio()
     s = W.Session(str(tmp_path / "c"), {}, W.Emitter(io.StringIO()), asr=LenASR(delay=0.02), profile="cpu")
@@ -593,7 +634,9 @@ def test_worker_with_the_real_model(rec, app_dir, fake_claude):
                                                         encoding="utf-8")
     assert rc == 0, err
     finals = [(e["speaker"], e["t"], e["text"]) for e in events if e["type"] == "final"]
-    assert [(s, t) for s, t, _ in finals] == [("other", "00:00:00"), ("me", "00:00:07"), ("other", "00:00:14"), ("me", "00:00:21")]
+    # live lines of the two sides may arrive out of order in this profile (the saved transcript is sorted by time)
+    assert sorted((t, s) for s, t, _ in finals) == [("00:00:00", "other"), ("00:00:07", "me"), ("00:00:14", "other"),
+                                                    ("00:00:21", "me")]
     for s, _, text in finals:
         for w in (("פגישה", "שלישי", "הצעת המחיר") if s == "other" else ("בסדר גמור", "ההצעה", "מחר")):
             assert w in text, text

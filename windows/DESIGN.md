@@ -702,6 +702,23 @@ Findings of the two QA reviews, fixed on this branch (still macOS offscreen only
 * Not reproduced: one Fatal Python error in a QtWebEngine teardown in a local offscreen run (QA finding 11); watch for it
   in CI.
 
+First windows-latest runs (CI enabled 2026-11-21, `.github/workflows/windows.yml`). install.ps1 + uninstall.ps1 pass on
+Windows PowerShell 5.1 (tiny model, re-run keeps the config, uninstall keeps the recordings), and the native screen-share
+probe reads WDA_EXCLUDEFROMCAPTURE on every window including the folder picker. Found and fixed there:
+
+* **cpu profile lost a line:** after a slow model load (15 s warm-up on 2 cores) the whole call arrives in one step;
+  the backlog pieces had seconds of silence inside, and in a merged call Whisper returned nothing for the second
+  "me" piece. Now each stretch of speech is queued on its own (`speech_runs`: split at 0.6 s of silence, trimmed, its
+  own timestamp, silent leftovers not sent), and a piece of a merged call that comes back without text is transcribed
+  again alone (`asr_retry` in the worker log). The backlog timestamps are right too (a piece used to carry the time of
+  its leading silence). Live lines of the two sides can still arrive out of order in this profile; the saved
+  transcript is sorted.
+* **Single instance:** a second launch writes "show" and disconnects at once; on a named pipe the bytes were lost
+  (read only on readyRead, socket deleted on disconnect). Now read on accept, readyRead and disconnect.
+* Tests only: fake COM strings / mix formats must be CoTaskMemAlloc'd on Windows (Timmy frees them: heap corruption),
+  the skill-test PDF is written by hand (Qt's offscreen QPdfWriter text has no text layer on Windows), the priority
+  check needs a 64-bit handle, and test Recorders are kept alive (the cyclic GC freed one inside its own timer slot).
+
 ## 14. Risks and open questions
 
 | Risk | Impact | Mitigation |
