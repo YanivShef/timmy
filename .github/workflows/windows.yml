@@ -4,7 +4,7 @@ name: windows
 # Agents: git push, then `gh run watch` / `gh run view --log-failed`; artifacts with `gh run download`.
 on:
   push:
-    branches: [windows]
+    branches: [main, windows]
   workflow_dispatch:
     inputs:
       asr_bench:

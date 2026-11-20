@@ -681,9 +681,8 @@ Findings of the two QA reviews, fixed on this branch (still macOS offscreen only
   מודל העברית". Now `Helper` runs under `Continue` and stringifies the ErrorRecords, every other uv / python call goes
   through `Native { ... }`, `HF_HUB_DISABLE_PROGRESS_BARS=1`, and `install_helper` itself sends Python and native stderr
   to `logs\install_helper.log` (dup2 on fd 2), so even a failed download prints only its JSON line (tested).
-* **Install path:** during the beta the Windows code lives on branch `windows`. INSTALL.md (this branch) clones with
-  `-b windows` or downloads `refs/heads/windows.zip`, and README has a Windows prompt that names the branch. When
-  windows/ is merged into main, both go back to the main URLs (and main's INSTALL.md loses its "coming soon" line).
+* **Install path:** windows/ is merged into main, so INSTALL.md clones main or downloads `refs/heads/main.zip`
+  (folder `timmy-main`) on Windows too. CI runs on pushes to main and to `windows`.
 * **WhatsApp dialog keys:** QDialog made every button auto-default, and "נתק" had the focus on open and again after
   "שלח" (the review widget hides and Qt moves the focus on). One Enter revoked the tokens. Now no button is default,
   each stage puts the focus on its own field (choose: recipient, review: draft, confirm: "לא זה, חזרה"), "נתק" is

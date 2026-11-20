@@ -82,14 +82,13 @@ def test_helper_writes_nothing_to_stderr(tmp_path):
     assert (tmp_path / "Timmy" / "logs" / "install_helper.log").exists()
 
 
-def test_install_docs_fetch_the_windows_branch():
-    """QA: the Windows code lives on branch `windows` during the beta; a clone of main has no windows/install.ps1."""
+def test_install_docs_fetch_main_for_windows():
+    """The Windows code is on main: the Windows steps clone main or download main.zip (folder timmy-main)."""
     doc = (WIN.parent / "INSTALL.md").read_text(encoding="utf-8")
-    assert "git clone -b windows https://github.com/YanivShef/timmy.git" in doc
-    assert "archive/refs/heads/windows.zip" in doc and "timmy-windows $HOME" in doc
-    win_part = doc.split("**ווינדוס:** בזמן הבטא")[1].split("## התקנה על מק")[0]
-    assert "main.zip" not in win_part
-    assert "git clone -b windows" in (WIN.parent / "README.md").read_text(encoding="utf-8")
+    assert "git clone https://github.com/YanivShef/timmy.git $HOME\\Timmy" in doc
+    assert "archive/refs/heads/main.zip -OutFile" in doc and "timmy-main $HOME" in doc
+    assert "-b windows" not in doc and "heads/windows.zip" not in doc
+    assert "-b windows" not in (WIN.parent / "README.md").read_text(encoding="utf-8")
 
 
 def test_helper_config_rules(app_dir, tmp_path, fake_claude):
