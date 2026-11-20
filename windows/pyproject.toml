@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timmy-windows"
+version = "0.1.0"
+description = "Timmy for Windows: live Hebrew call recorder and transcriber (Chrome audio + mic)"
+requires-python = ">=3.12,<3.13"
+# Core deps only. Heavy parts are extras so CI jobs install just what they test (see DESIGN.md, "CI").
+dependencies = [
+    "numpy==2.5.4",
+]
+
+[project.optional-dependencies]
+audio = [
+    "comtypes==1.4.17; sys_platform == 'win32'",
+    "soxr==1.1.0",
+    "psutil==7.2.2",
+    "sounddevice==0.5.6",
+]
+asr = [
+    "faster-whisper==1.2.1",
+    "ctranslate2==4.9.0",
+    "huggingface_hub==2.4.0",
+]
+ui = [
+    # full PySide6 (Essentials + Addons): QtWebEngine is needed for HTML -> PDF (printToPdf)
+    "PySide6==6.12.0",
+]
+system = [
+    "keyring==25.7.0",
+    "imageio-ffmpeg==0.8.1",
+]
+dev = [
+    "pytest==9.2.0",
+    "ruff==0.17.4",
+]
+
+[project.scripts]
+timmy = "timmy.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["timmy*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+markers = [
+    "windows_only: needs a real Windows host (skipped elsewhere)",
+    "slow: long-running (model download, real transcription)",
+    "audio: touches WASAPI / audio devices (skipped when no device)",
+    "ui: needs PySide6 (offscreen or native QPA)",
+    "asr: needs faster-whisper and a model",
+]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+extend-exclude = [
+    # generated / vendored from mac/ by tools/sync_mac.py (build step 1): checked by a drift test, not linted
+    "timmy/engine/_mac/*",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F", "W6", "B006", "B008", "PLE"]

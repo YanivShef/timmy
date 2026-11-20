@@ -1,0 +1,106 @@
+name: windows
+
+# INSTALL LOCATION: this file belongs at .github/workflows/windows.yml. It is kept here because the GitHub token on the
+# dev machine has no "workflow" scope (GitHub refuses pushes that add workflow files without it). To enable CI:
+#   gh auth refresh -h github.com -s workflow
+#   git switch windows && mkdir -p .github/workflows && git mv windows/ci/windows.yml .github/workflows/windows.yml
+#   git commit -m "CI: enable the Windows workflow" && git push
+
+# Timmy for Windows (windows/). Runs on every push to the "windows" branch and on demand.
+# Agents: git push, then `gh run watch` / `gh run view --log-failed`; artifacts with `gh run download`.
+on:
+  push:
+    branches: [windows]
+  workflow_dispatch:
+    inputs:
+      asr_bench:
+        description: "Also measure ivrit.ai CT2 transcription speed on the runner CPU (downloads 1.6 GB)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  test:
+    name: lint + import + pytest (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: windows/pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Environment
+        run: |
+          python -c "import sys, platform; print(sys.version); print(platform.platform()); print(sys.getwindowsversion())"
+          python -m timmy
+
+      - name: Lint (ruff)
+        run: python -m ruff check . --output-format=github
+
+      - name: Byte-compile everything
+        run: python -m compileall -q timmy tests tools
+
+      - name: Tests
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          python -m pytest -v --junitxml=out/junit.xml 2>&1 | Tee-Object -FilePath out/pytest.log
+          exit $LASTEXITCODE
+
+      - name: Upload logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-output
+          path: windows/out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  asr-bench:
+    name: ASR speed on runner CPU (on demand)
+    if: github.event_name == 'workflow_dispatch' && inputs.asr_bench
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: windows/pyproject.toml
+      - name: Install
+        run: python -m pip install -e ".[asr]"
+      - name: Download model
+        run: python -c "from huggingface_hub import snapshot_download; print(snapshot_download('ivrit-ai/whisper-large-v3-turbo-ct2'))"
+      - name: Benchmark (all cores)
+        run: python tools/bench_asr.py --out out/bench-all-cores.json
+      - name: Benchmark (2 threads, a weak laptop)
+        run: python tools/bench_asr.py --threads 2 --out out/bench-2-threads.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: asr-bench
+          path: windows/out/
+          if-no-files-found: ignore
