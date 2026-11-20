@@ -8,11 +8,11 @@ import os
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon
-from PySide6.QtWidgets import QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QFrame, QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from timmy import config as tconfig
 from timmy import onboard as O
-from timmy.ui import shell
+from timmy.ui import pickers, shell
 from timmy.ui import theme as T
 from timmy.ui.bridge import Bridge
 from timmy.ui.calls_window import ASSETS, he, image, label
@@ -235,7 +235,7 @@ class OnboardingWindow(QWidget):
             self.code.clear()
 
     def pick_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "בחר את תיקיית ההקלטות", O.recordings_dir())
+        d = pickers.existing_directory(self, "בחר את תיקיית ההקלטות", O.recordings_dir())
         if d:
             O.set_folder(d)
             self.refresh()

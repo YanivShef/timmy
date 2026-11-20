@@ -55,6 +55,10 @@ def test_island_states_screenshots(qapp, screens, look_default):
     r.demo()
     for _ in range(10):
         isl.sync()
+    qapp.processEvents()             # one layout pass, as in the app: the key points box sticks to its newest line
+    sb = isl.body.bullets_scroll.verticalScrollBar()
+    assert sb.value() == sb.maximum()
+    assert isl.body.bullets_scroll.fade_bottom.isHidden() == (sb.value() == sb.maximum())   # a cut line fades out (QA)
     shots["card"] = save_shot(isl, screens / "island-card.png")
     r.demo(thinking=True)
     shots["thinking"] = save_shot(isl, screens / "island-card-thinking.png")

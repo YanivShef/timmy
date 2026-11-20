@@ -671,6 +671,37 @@ prompt is expected), `os.startfile` for `ms-settings:` and the browser, `claude.
 `uv venv`, `uv pip install` from the repo path, `.lnk` + `.ico`), uninstall.ps1. Manual QA on a real PC: the Greenolink
 login with a real phone (never sending to a real contact without the owner), Claude Code login, Git for Windows prompt.
 
+### 13.5 QA fixes after step 4 (2026-11-21)
+
+Findings of the two QA reviews, fixed on this branch (still macOS offscreen only, CI still parked, see 12):
+
+* **install.ps1 on PowerShell 5.1:** `& python ... 2>&1` under `ErrorActionPreference = "Stop"` turns every stderr line
+  of a native program into a terminating NativeCommandError (5.1 behaviour, changed only in PowerShell 7.2), and the
+  model download writes tqdm progress and a Hub warning to stderr, so the first install would have died at "מוריד את
+  מודל העברית". Now `Helper` runs under `Continue` and stringifies the ErrorRecords, every other uv / python call goes
+  through `Native { ... }`, `HF_HUB_DISABLE_PROGRESS_BARS=1`, and `install_helper` itself sends Python and native stderr
+  to `logs\install_helper.log` (dup2 on fd 2), so even a failed download prints only its JSON line (tested).
+* **Install path:** during the beta the Windows code lives on branch `windows`. INSTALL.md (this branch) clones with
+  `-b windows` or downloads `refs/heads/windows.zip`, and README has a Windows prompt that names the branch. When
+  windows/ is merged into main, both go back to the main URLs (and main's INSTALL.md loses its "coming soon" line).
+* **WhatsApp dialog keys:** QDialog made every button auto-default, and "נתק" had the focus on open and again after
+  "שלח" (the review widget hides and Qt moves the focus on). One Enter revoked the tokens. Now no button is default,
+  each stage puts the focus on its own field (choose: recipient, review: draft, confirm: "לא זה, חזרה"), "נתק" is
+  mouse-only and takes two clicks ("לנתק? לחץ שוב", 4 s), and "שלח עכשיו" takes no keyboard focus at all.
+* **Model failure:** if the model cannot start (missing and offline, or ctranslate2 fails) the worker emits
+  `{"type": "error", "kind": "model_missing" | "model_load"}` and exits with code 3 (`os._exit`, the stdin reader thread
+  would abort a normal shutdown). The recorder deletes the call's WAVs and shows "מודל העברית חסר..." instead of
+  "לא נקלט דיבור"; the tray balloon says what to do.
+* **File pickers and screen sharing:** the static QFileDialog calls open the native shell dialog, which the ShareHider
+  filter never sees. `ui/pickers.py` uses Qt's own dialog (a QWidget, so it is hidden) while hiding is on and the native
+  one when it is off; a test forbids `QFileDialog.get*` anywhere else.
+* **Summary tables:** a CSS `background` on `<td>` paints behind the text only in Qt rich text; cells now use `bgcolor`
+  with the tint mixed over the window background.
+* **Key points box:** it sticks to the newest point after every update (also on the layout pass after the text
+  changes) and a cut line at either edge fades out in the panel's own color.
+* Not reproduced: one Fatal Python error in a QtWebEngine teardown in a local offscreen run (QA finding 11); watch for it
+  in CI.
+
 ## 14. Risks and open questions
 
 | Risk | Impact | Mitigation |

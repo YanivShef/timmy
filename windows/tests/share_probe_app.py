@@ -4,7 +4,7 @@ Starts the real TimmyApp (TIMMY_APP_DIR, TIMMY_DRY_OPEN and a fake Claude come f
 owner can reach (the island and the recording card in demo mode, the menu, a tooltip, "השיחות שלי", "שלח בוואטסאפ",
 "שפר את טימי", "עצב את טימי", "עיצוב ה-PDF", the onboarding), then reads GetWindowDisplayAffinity of every VISIBLE
 top-level window this process owns (EnumWindows, not only the Qt list, so native windows are caught too). A second
-pass opens the folder picker of the onboarding (QFileDialog, the native Windows dialog) the same way.
+pass opens the folder picker of the onboarding (ui/pickers.py) the same way.
 
 Prints one JSON line: {"windows": [...], "dialog": [...], "error": ...}. Takes screenshots when argv[1] is a folder.
 """
@@ -89,9 +89,10 @@ def main():
         t.menu.close()
         QToolTip.hideText()
 
-        # native folder picker (onboarding "בחר תיקייה"): shown non-blocking, read, then closed
-        d = QFileDialog(t.onboarding, "בחר את תיקיית ההקלטות")
-        d.setFileMode(QFileDialog.FileMode.Directory)
+        # the folder picker of the onboarding (ui/pickers.py: Qt's own dialog while hiding is on, so the filter hides it),
+        # shown non-blocking, read, then closed
+        from timmy.ui import pickers
+        d = pickers.make_dialog(t.onboarding, "בחר את תיקיית ההקלטות", mode=QFileDialog.FileMode.Directory)
         QTimer.singleShot(0, d.open)
         pump(app, 3.0)
         known = {x["hwnd"] for x in res["windows"]}

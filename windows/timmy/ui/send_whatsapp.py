@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import webbrowser
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout,
                                QWidget)
@@ -114,7 +114,12 @@ class SendDialog(QDialog):
                                build_pdf=build_pdf)
         self.s.auth_failed = self.state.auth_failed
         self.look = T.current()
+        self._focused_stage = None
+        self._disconnect_armed = False
         self._build()
+        for b in self.findChildren(QPushButton):       # also the kind buttons: QDialog makes every button auto-default
+            b.setAutoDefault(False)
+            b.setDefault(False)
         self.setStyleSheet(self.look.stylesheet())
         if self.state.wa in ("unknown", "missing"):
             self.state.check(self.bridge.spawn)
@@ -132,6 +137,10 @@ class SendDialog(QDialog):
         b = QPushButton(he(text))
         if name:
             b.setObjectName(name)
+        # no button of this dialog is ever a default button: Enter / Return must not press whatever has the focus
+        # (QA: one Enter right after opening pressed "נתק" and dropped the WhatsApp link)
+        b.setAutoDefault(False)
+        b.setDefault(False)
         b.clicked.connect(fn)
         return b
 
@@ -157,9 +166,17 @@ class SendDialog(QDialog):
             self.open_url or (lambda u: QDesktopServices.openUrl(QUrl(u)))), "link")
         self.cancel_conn_btn = self._btn("ביטול", self.state.cancel_connect, "small")
         self.register_btn = self._btn("אין לך חשבון? הרשמה ל-Greenolink", lambda: QDesktopServices.openUrl(QUrl(G.REGISTER_URL)), "link")
-        self.disconnect_btn = self._btn("נתק", lambda: self.state.disconnect(self.bridge.spawn), "small")
+        self.disconnect_btn = self._btn("נתק", self._disconnect_clicked, "small")
+        self._disarm = QTimer(self)
+        self._disarm.setSingleShot(True)
+        self._disarm.setInterval(4000)
+        self._disarm.timeout.connect(self._disarm_disconnect)
         for b in (self.connect_btn, self.reopen_btn, self.cancel_conn_btn, self.register_btn, self.disconnect_btn):
+            # the connection row never takes the focus by itself (only Tab reaches it): when a stage hides its widgets
+            # Qt hands the focus to the next focus-taking widget, and that must not be "נתק"
+            b.setFocusPolicy(Qt.FocusPolicy.TabFocus)
             cr.addWidget(b)
+        self.disconnect_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # not even by Tab: "נתק" is a mouse click only
         cr.addStretch(1)
         cl.addLayout(cr)
         root.addWidget(self.conn)
@@ -252,8 +269,10 @@ class SendDialog(QDialog):
         fl.addWidget(self.confirm_to)
         fr = QHBoxLayout()
         self.send_now = self._btn("שלח עכשיו", self._confirm_clicked, "primary")
+        self.send_now.setFocusPolicy(Qt.FocusPolicy.NoFocus)     # sending is a mouse click only, never a key press
         fr.addWidget(self.send_now)
-        fr.addWidget(self._btn("לא זה, חזרה", lambda: self.s.set_stage("review")))
+        self.confirm_back = self._btn("לא זה, חזרה", lambda: self.s.set_stage("review"))
+        fr.addWidget(self.confirm_back)
         fr.addStretch(1)
         fl.addLayout(fr)
         root.addWidget(self.confirm)
@@ -294,6 +313,34 @@ class SendDialog(QDialog):
         self.s.set_request(self.request.toPlainText())
         self.attach.setChecked(self.s.attach_pdf)
 
+    def _disconnect_clicked(self):
+        """Two steps, like "למחוק?" in the recording card: the first click asks, the second (within 4 s) disconnects."""
+        if not self._disconnect_armed:
+            self._disconnect_armed = True
+            self.disconnect_btn.setText(he("לנתק? לחץ שוב"))
+            self._disarm.start()
+            return
+        self._disarm_disconnect()
+        self.state.disconnect(self.bridge.spawn)
+
+    def _disarm_disconnect(self):
+        self._disarm.stop()
+        self._disconnect_armed = False
+        self.disconnect_btn.setText(he("נתק"))
+
+    def _focus_for_stage(self, kind):
+        """A stage change puts the focus on that stage's safe field, so it never drifts to the connection row."""
+        if kind == self._focused_stage and kind != "pick":     # the pick list is rebuilt on every refresh
+            return
+        self._focused_stage = kind
+        target = {"choose": self.recipient, "review": self.draft, "confirm": self.confirm_back,
+                  "sent": self.close_btn, "failed": self.close_btn}.get(kind)
+        if kind == "pick":
+            target = self.pick_back
+        if target is None:
+            target = self                                  # drafting / sending: the dialog itself holds the focus
+        target.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _confirm_clicked(self):
         st = self.s.stage
         if st[0] == "confirm":
@@ -326,6 +373,8 @@ class SendDialog(QDialog):
         self.reopen_btn.setVisible(waiting)
         self.cancel_conn_btn.setVisible(waiting)
         self.disconnect_btn.setVisible(linked)
+        if not linked and self._disconnect_armed:
+            self._disarm_disconnect()
         can = linked or connected
         kind = st[0]
         self.choose.setVisible(kind == "choose")
@@ -380,7 +429,8 @@ class SendDialog(QDialog):
             self.pick_lay.addWidget(label("יש כמה אנשי קשר שמתאימים. למי לשלוח?", "muted"))
             for c in st[1]:
                 self.pick_lay.addWidget(self._btn(W.recipient_label(c), lambda _=False, c=c: self.s.pick(c)))
-            self.pick_lay.addWidget(self._btn("חזרה", lambda: self.s.set_stage("review"), "link"))
+            self.pick_back = self._btn("חזרה", lambda: self.s.set_stage("review"), "link")
+            self.pick_lay.addWidget(self.pick_back)
         self.result.setVisible(kind in ("sent", "failed"))
         if kind == "sent":
             self.result.setObjectName("ok")
@@ -392,6 +442,7 @@ class SendDialog(QDialog):
         self.result.style().polish(self.result)
         self.back_btn.setVisible(kind == "failed")
         self.close_btn.setVisible(kind in ("sent", "failed"))
+        self._focus_for_stage(kind)
 
 
 def pdf_builder(owner):

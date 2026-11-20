@@ -222,15 +222,16 @@ class ThinkingDots(QWidget):
 class TopFade(QWidget):
     """A gradient from the card color to transparent over the top of a scroll area (the Mac mask)."""
 
-    def __init__(self, color: QColor, h: int = 14, parent=None):
+    def __init__(self, color: QColor, h: int = 14, parent=None, bottom: bool = False):
         super().__init__(parent)
         self.color = color
+        self.bottom = bottom              # the same gradient upside down, over the bottom edge
         self.setFixedHeight(h)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
     def paintEvent(self, _):
         p = QPainter(self)
-        g = QLinearGradient(0, 0, 0, self.height())
+        g = QLinearGradient(0, self.height(), 0, 0) if self.bottom else QLinearGradient(0, 0, 0, self.height())
         g.setColorAt(0, self.color)
         g.setColorAt(1, alpha(self.color, 0.0))
         p.fillRect(self.rect(), g)

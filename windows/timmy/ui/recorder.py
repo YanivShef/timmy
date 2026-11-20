@@ -36,6 +36,12 @@ FLASH_S = 2.5
 ARM_S = 4.0
 CONFIRM_AFTER_S = 0.5
 NOTICE_S = 6.0
+FLASH_ERROR_S = 6.0
+# the worker's {"type": "error"} kinds (timmy.engine.worker.model_error_kind)
+MODEL_MESSAGES = {
+    "model_missing": "מודל העברית חסר. צריך להריץ שוב את ההתקנה",
+    "model_load": "מודל העברית לא נטען. כדאי להפעיל מחדש את טימי",
+}
 
 
 def child_python() -> str:
@@ -95,6 +101,7 @@ class Recorder(QObject):
     need_folder = Signal()               # not enough space: the UI opens the folder choice (Mac timmy.diskFull)
     saved = Signal(str)                  # final .md path of a finished call
     calls_changed = Signal()
+    model_failed = Signal(str)           # the worker could not start the model ("model_missing" / "model_load")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -114,6 +121,7 @@ class Recorder(QObject):
         self.base = ""
         self.done_file: str | None = None
         self.stopped_for_disk = False
+        self.worker_error: str | None = None
         self.last_error = ""
 
         self._gen = 0
@@ -149,10 +157,10 @@ class Recorder(QObject):
     def _changed(self):
         self.changed.emit()
 
-    def flash(self, text: str):
+    def flash(self, text: str, seconds: float = FLASH_S):
         self.phase = "message"
         self.message = text
-        self._flash_timer.start(int(FLASH_S * 1000))
+        self._flash_timer.start(int(seconds * 1000))
         self._changed()
 
     def _end_flash(self):
@@ -217,6 +225,7 @@ class Recorder(QObject):
             self.need_folder.emit()
             return False
         self.stopped_for_disk = False
+        self.worker_error = None
         try:
             os.makedirs(rec, exist_ok=True)
         except OSError as e:
@@ -327,6 +336,10 @@ class Recorder(QObject):
             if self.phase == "recording":
                 self.stopped_for_disk = True
                 self.stop()
+        elif t == "error":
+            self.worker_error = str(o.get("kind") or "model_load")
+            if self.phase == "recording":
+                self.stop()
         else:
             return
         self._changed()
@@ -409,7 +422,14 @@ class Recorder(QObject):
             self.phase = "finishing"
         txt = self.done_file or (base + ".txt")
         self.loading = False
-        if not self.lines:
+        err = getattr(self, "worker_error", None)
+        self.worker_error = None
+        if err and not self.lines:
+            # the model could not start: not "no speech". Nothing was transcribed, so the WAVs go too (QA)
+            delete_recording_files(base)
+            self.flash(MODEL_MESSAGES.get(err, MODEL_MESSAGES["model_load"]), seconds=FLASH_ERROR_S)
+            self.model_failed.emit(err)
+        elif not self.lines:
             try:
                 if txt.endswith(".txt") and os.path.exists(txt):
                     os.remove(txt)

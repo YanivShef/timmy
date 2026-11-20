@@ -53,6 +53,45 @@ def test_install_script_rules():
     assert "-m timmy --background" not in s           # the Run entry comes from winsys.startup through the helper
 
 
+def test_native_stderr_never_stops_the_install():
+    """QA blocker: on Windows PowerShell 5.1, `& python ... 2>&1` under ErrorActionPreference Stop turns the first stderr
+    line (tqdm progress of the model download, a Python warning) into a terminating error, so the install died at
+    "מוריד את מודל העברית". Every native call now runs under Continue and progress bars are off."""
+    s = (WIN / "install.ps1").read_text(encoding="utf-8-sig")
+    helper = s.split("function Helper(")[1].split("\nfunction ")[0]
+    assert '$ErrorActionPreference = "Continue"' in helper and "finally { $ErrorActionPreference = $prev }" in helper
+    assert '"$_"' in helper                       # ErrorRecords from stderr become plain strings
+    assert '$env:HF_HUB_DISABLE_PROGRESS_BARS = "1"' in s
+    code = [ln for ln in s.splitlines() if not ln.strip().startswith("#")]
+    for ln in code:
+        # every uv / python call outside the Helper goes through Native { ... }
+        if re.search(r"& \$(uv|Py)\b", ln) and "function Helper" not in ln and "install_helper" not in ln:
+            assert "Native {" in ln, ln
+
+
+def test_helper_writes_nothing_to_stderr(tmp_path):
+    """The helper itself keeps stderr empty (progress, warnings, tracebacks go to logs\\install_helper.log): even a failed
+    model download prints only its JSON line."""
+    env = {**os.environ, "TIMMY_APP_DIR": str(tmp_path / "Timmy"), "HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf"),
+           "PYTHONPATH": str(WIN), "PYTHONWARNINGS": "default"}
+    r = subprocess.run([sys.executable, "-m", "timmy.install_helper", "model", "--repo", "timmy-test/no-such-model"],
+                       capture_output=True, timeout=120, env=env, cwd=WIN)
+    assert r.stderr == b"", r.stderr.decode("utf-8", "replace")
+    out = json.loads(r.stdout.decode("utf-8").strip().splitlines()[-1])
+    assert r.returncode == 1 and out["ok"] is False and out["error"]
+    assert (tmp_path / "Timmy" / "logs" / "install_helper.log").exists()
+
+
+def test_install_docs_fetch_the_windows_branch():
+    """QA: the Windows code lives on branch `windows` during the beta; a clone of main has no windows/install.ps1."""
+    doc = (WIN.parent / "INSTALL.md").read_text(encoding="utf-8")
+    assert "git clone -b windows https://github.com/YanivShef/timmy.git" in doc
+    assert "archive/refs/heads/windows.zip" in doc and "timmy-windows $HOME" in doc
+    win_part = doc.split("**ווינדוס:** בזמן הבטא")[1].split("## התקנה על מק")[0]
+    assert "main.zip" not in win_part
+    assert "git clone -b windows" in (WIN.parent / "README.md").read_text(encoding="utf-8")
+
+
 def test_helper_config_rules(app_dir, tmp_path, fake_claude):
     rc, r = run_helper("config", "--name", "רוני", "--about", "סטודיו לעיצוב", "--people", "דנה כהן,\nאבי לוי , ")
     cfg = tconfig.load()

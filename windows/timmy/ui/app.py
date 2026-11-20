@@ -91,6 +91,7 @@ class TimmyApp(QObject):
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._tray_activated)
         self.rec.need_folder.connect(self._no_space)
+        self.rec.model_failed.connect(self._model_failed)
         self.rec.calls_changed.connect(self._calls_changed)
         T.bus().changed.connect(self.restyle)
         self.restyle(self.look)
@@ -225,6 +226,14 @@ class TimmyApp(QObject):
     def _calls_changed(self):
         if self.calls_window is not None and self.calls_window.isVisible():
             self.calls_window.reload_if_changed()
+
+    def _model_failed(self, kind: str):
+        """The worker could not start the Hebrew model: the pill says it for a few seconds, the tray keeps the details."""
+        from timmy.ui.recorder import MODEL_MESSAGES
+        more = {"model_missing": "ההקלטה לא נשמרה. מריצים שוב את ההתקנה של טימי (צריך אינטרנט), והמודל יורד.",
+                "model_load": "ההקלטה לא נשמרה. הפרטים בקובץ logs\\worker.log בתיקייה של טימי."}.get(kind, "")
+        if QSystemTrayIcon.isSystemTrayAvailable() and self.tray.isVisible():
+            self.tray.showMessage("טימי", MODEL_MESSAGES.get(kind, MODEL_MESSAGES["model_load"]) + "\n" + more)
 
     def _no_space(self):
         """Not enough space to start: the folder step of the onboarding (the Mac opens the same step)."""

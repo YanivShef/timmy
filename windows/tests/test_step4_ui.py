@@ -201,6 +201,54 @@ def test_send_dialog_pick_and_failure(qapp, rec_dir, fake_claude, screens, mock)
     d.reject()
 
 
+def test_send_dialog_keys_never_disconnect_or_send(qapp, rec_dir, mem_secrets, monkeypatch):
+    """QA: one Enter right after opening (or after "שלח") pressed "נתק", which revoked the tokens. No button is a
+    default button, focus goes to the stage's own field, "נתק" takes two clicks and "שלח עכשיו" never takes keys."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from timmy.integrations import greenolink as G
+    from timmy.ui import calls as C
+    from timmy.ui.send_whatsapp import SendDialog, WAState
+    monkeypatch.setattr(G, "has_token", lambda: True)
+    gone, sent = [], []
+    monkeypatch.setattr(WAState, "disconnect", lambda self, spawn: gone.append(1))
+    st = WAState()
+    st.wa = "linked"
+    d = SendDialog(C.list_calls(str(rec_dir))[0], state=st)
+    monkeypatch.setattr(d.s, "confirm_send", lambda c: sent.append(c))
+    d.show()
+    d.activateWindow()
+    qapp.processEvents()
+
+    def keys():
+        for k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            QTest.keyClick(qapp.focusWidget() or d, k)
+            qapp.processEvents()
+
+    assert all(not b.autoDefault() and not b.isDefault() for b in d.findChildren(type(d.send_btn)))
+    assert d.disconnect_btn.focusPolicy() == Qt.FocusPolicy.NoFocus and d.send_now.focusPolicy() == Qt.FocusPolicy.NoFocus
+    keys()
+    assert gone == [] and qapp.focusWidget() is not d.disconnect_btn
+    d.s.draft = "היי"
+    d.s.set_stage("review")
+    qapp.processEvents()
+    assert qapp.focusWidget() is d.draft
+    d.s.set_stage("confirm", G.Candidate("דנה כהן", "0501234567", "0501234567"))
+    qapp.processEvents()
+    assert d.confirm.isVisible() and qapp.focusWidget() is d.confirm_back
+    keys()                                           # Enter / Space only reach "לא זה, חזרה"
+    assert gone == [] and sent == [] and d.s.stage[0] == "review"
+    # "נתק": the first click only asks, the second disconnects; the question resets by itself
+    d.disconnect_btn.click()
+    assert gone == [] and "לחץ שוב" in d.disconnect_btn.text()
+    d._disarm_disconnect()
+    assert d.disconnect_btn.text().endswith("נתק")
+    d.disconnect_btn.click()
+    d.disconnect_btn.click()
+    assert gone == [1]
+    d.reject()
+
+
 # ---- onboarding (checks) -----------------------------------------------------------------------------------------
 def test_detect_claude_states(app_dir, fake_claude, monkeypatch):
     from timmy import config as tconfig

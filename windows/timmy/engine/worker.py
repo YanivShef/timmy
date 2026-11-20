@@ -5,6 +5,7 @@
 
 stdin  = frames [1 byte channel 0 = Chrome, 1 = mic][uint32 LE n][n float32 16 kHz mono] until EOF (protocol.py)
 stdout = {"type": "loading" | "ready" | "partial" | "final" | "bullets" | "saving" | "done" | "diskfull" | "restyled"}
+         + {"type": "error", "kind": "model_missing" | "model_load", "detail"} when the model cannot start (exit code 3)
 files  = <base>.ch0.wav / .ch1.wav while recording, <base>.txt ("[hh:mm:ss] <owner>: ..." / "צד שני: ..."),
          <base> נקודות.md (live key points); at the end "<stamp> [<person> - ]<title>.md", ".mp3", " - תמלול.txt"
 stderr = diagnostics only ({"event": "asr", ...}, tracebacks); the UI never parses it.
@@ -657,6 +658,20 @@ class Session:
         return new + ".md"
 
 
+EXIT_MODEL = 3
+
+
+def model_error_kind(cfg: dict) -> str:
+    """"model_missing" when no complete model is on disk (the installer / onboarding must download it), else "model_load"."""
+    if (os.environ.get("TIMMY_ASR_BACKEND") or "").lower() == "fake":
+        return "model_load"
+    try:
+        A.resolve_model(cfg, download=False)
+        return "model_load"
+    except Exception:
+        return "model_missing"
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     setup_stdio()
@@ -676,10 +691,24 @@ def main(argv=None) -> int:
     s.start_reader(sys.stdin.buffer)
     s.tabs = tabs_mod.chrome_tabs()
     emit({"type": "loading"})
-    s.asr = A.make_asr(cfg)
-    t0 = time.perf_counter()
-    s.tr(np.zeros(SR, np.float32))
-    warm = time.perf_counter() - t0
+    try:
+        s.asr = A.make_asr(cfg)
+        t0 = time.perf_counter()
+        s.tr(np.zeros(SR, np.float32))
+        warm = time.perf_counter() - t0
+    except Exception as e:
+        # no model (offline first run, a deleted models folder) or ctranslate2 cannot load it: tell the UI why
+        # instead of ending like a call without speech (QA); the UI deletes this call's WAVs
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        emit({"type": "error", "kind": model_error_kind(cfg), "detail": f"{type(e).__name__}: {e}"[:300]})
+        # the reader thread is blocked on stdin: a normal interpreter shutdown would abort on its buffer lock
+        for f in (sys.stdout, sys.stderr):
+            try:
+                f.flush()
+            except (OSError, ValueError):
+                pass
+        os._exit(EXIT_MODEL)
     s.profile = A.pick_profile(cfg, getattr(s.asr, "device", "cpu"), warm)
     if getattr(s.asr, "device", "cpu") == "cpu" and s.profile == "cpu":
         jobs.lower_priority()

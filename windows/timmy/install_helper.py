@@ -103,7 +103,31 @@ def do_cleanup(_a) -> dict:
     return {"ok": True}
 
 
+def quiet_stderr() -> None:
+    """install.ps1 runs on Windows PowerShell 5.1, where a stderr line of a native program captured with 2>&1 under
+    ErrorActionPreference Stop aborts the whole install. Progress bars (tqdm in huggingface_hub), warnings and Qt
+    messages therefore go to <app dir>\\logs\\install_helper.log, also at the file-descriptor level (C++ libraries)."""
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    os.environ.setdefault("PYTHONWARNINGS", "ignore")
+    import warnings
+    warnings.simplefilter("ignore")
+    try:
+        logs = paths.app_dir() / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        log = open(logs / "install_helper.log", "a", encoding="utf-8", buffering=1)
+    except OSError:
+        log = open(os.devnull, "w", encoding="utf-8")
+    try:
+        sys.stderr.flush()
+        os.dup2(log.fileno(), 2)
+    except (OSError, ValueError, AttributeError):
+        pass
+    sys.stderr = log
+
+
 def main(argv=None) -> int:
+    if argv is None:
+        quiet_stderr()
     for s in (sys.stdout, sys.stderr):
         try:
             s.reconfigure(encoding="utf-8")

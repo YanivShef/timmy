@@ -10,9 +10,11 @@
    - **מק:** המשך להתקנת מק.
    - **ווינדוס:** המשך ל"התקנה על ווינדוס" למטה. גרסת הווינדוס חדשה (בטא): תגיד את זה למשתמש במשפט אחד.
 2. הורד את טימי לתיקייה `~/Timmy`:
-   - **אם יש git:** `git clone https://github.com/YanivShef/timmy.git ~/Timmy`. אם התיקייה כבר קיימת, הרץ בה `git pull`.
-   - **אם אין git** (במק חדש הפקודה פותחת חלון התקנה, אל תחכה לו): `curl -L https://github.com/YanivShef/timmy/archive/refs/heads/main.zip -o /tmp/timmy.zip && rm -rf ~/Timmy && unzip -q /tmp/timmy.zip -d /tmp && mv /tmp/timmy-main ~/Timmy`
-   - **ווינדוס בלי git** (ב-PowerShell): `Invoke-WebRequest https://github.com/YanivShef/timmy/archive/refs/heads/main.zip -OutFile $env:TEMP\timmy.zip; Remove-Item -Recurse -Force $HOME\Timmy -ErrorAction SilentlyContinue; Expand-Archive $env:TEMP\timmy.zip $env:TEMP\timmy-src -Force; Move-Item $env:TEMP\timmy-src\timmy-main $HOME\Timmy`
+   - **מק עם git:** `git clone https://github.com/YanivShef/timmy.git ~/Timmy`. אם התיקייה כבר קיימת, הרץ בה `git pull`.
+   - **מק בלי git** (במק חדש הפקודה פותחת חלון התקנה, אל תחכה לו): `curl -L https://github.com/YanivShef/timmy/archive/refs/heads/main.zip -o /tmp/timmy.zip && rm -rf ~/Timmy && unzip -q /tmp/timmy.zip -d /tmp && mv /tmp/timmy-main ~/Timmy`
+   - **ווינדוס:** בזמן הבטא קוד הווינדוס נמצא בענף `windows` של הריפו (לא ב-main), אז מורידים את הענף הזה. אם ב-`~/Timmy` אין את הקובץ `windows\install.ps1`, הורדת את הענף הלא נכון.
+     - **עם git:** `git clone -b windows https://github.com/YanivShef/timmy.git $HOME\Timmy`. אם התיקייה כבר קיימת, הרץ בה `git fetch origin windows; git switch windows; git pull`.
+     - **בלי git** (ב-PowerShell): `Invoke-WebRequest https://github.com/YanivShef/timmy/archive/refs/heads/windows.zip -OutFile $env:TEMP\timmy.zip; Remove-Item -Recurse -Force $HOME\Timmy -ErrorAction SilentlyContinue; Expand-Archive $env:TEMP\timmy.zip $env:TEMP\timmy-src -Force; Move-Item $env:TEMP\timmy-src\timmy-windows $HOME\Timmy`
 
 ## התקנה על מק
 

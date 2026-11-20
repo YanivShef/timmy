@@ -421,6 +421,19 @@ def test_no_speech(rec, app_dir, fake_claude):
     assert claude_calls(fake_claude[1]) == []
 
 
+def test_missing_model_is_an_error_not_no_speech(rec, app_dir, fake_claude, tmp_path):
+    """QA: offline with no model, the worker used to die like a call without speech. Now: {"type": "error"} + exit 3."""
+    from timmy.engine import worker as Wk
+    base = rec / "2026-11-20 12-30-00 כרום"
+    env = env_for(fake_claude, TIMMY_ASR_BACKEND="", TIMMY_ASR_MODEL="timmy-test/no-such-model", HF_HUB_OFFLINE="1",
+                  HF_HOME=str(tmp_path / "hf"))
+    events, rc, err, _ = WF.run_worker(base, WF.silence(2), WF.silence(2), env, speed=8)
+    assert rc == Wk.EXIT_MODEL, err
+    assert WF.types(events) == ["loading", "error"] and events[-1]["kind"] == "model_missing", events
+    assert events[-1]["detail"]
+    assert claude_calls(fake_claude[1]) == []
+
+
 def test_mic_echo_of_the_other_side_is_not_a_line(rec, app_dir, fake_claude):
     # (not in the first half second: the sound check needs 0.5 s of Chrome history before the mic line, as on the Mac)
     ch0 = place(12, [(2.0, fixture("he_short.wav"))])

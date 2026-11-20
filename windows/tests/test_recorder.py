@@ -76,6 +76,27 @@ def test_full_call_saved(qapp, call_env, app_dir):
     assert wait_until(qapp, lambda: r.phase == "idle", 5)
 
 
+def test_model_failure_is_shown_and_files_deleted(qapp, call_env, tmp_path, monkeypatch):
+    """The worker cannot start the model: not "לא נקלט דיבור", the model message, and no WAVs left behind (QA)."""
+    from timmy.ui.recorder import MODEL_MESSAGES
+    monkeypatch.setenv("TIMMY_ASR_BACKEND", "")
+    monkeypatch.setenv("TIMMY_ASR_MODEL", "timmy-test/no-such-model")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    r = new_recorder()
+    failed = []
+    r.model_failed.connect(failed.append)
+    assert r.start() is True
+    assert wait_until(qapp, lambda: r.phase == "message", 60), (r.phase, r.message)
+    assert r.message == MODEL_MESSAGES["model_missing"] and failed == ["model_missing"]
+    assert wait_until(qapp, lambda: not os.path.exists(call_env) or os.listdir(call_env) == [], 10), os.listdir(call_env)
+    assert r.worker_error is None
+    # the 6 s message timer must not outlive this test's recorder (a cyclic-GC delete inside a later event loop crashes)
+    r._flash_timer.stop()
+    r._end_flash()
+    r.model_failed.disconnect()
+
+
 def test_cancel_two_steps_kills_and_deletes(qapp, call_env):
     r = new_recorder()
     assert r.start()

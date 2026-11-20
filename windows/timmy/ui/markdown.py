@@ -120,6 +120,13 @@ def to_html(blocks: list[Block], look, base_dir: str = "") -> str:
     """Qt rich text, RTL. `look` = timmy.ui.theme.Look."""
     ink = lambda a=1.0: look.css(look.ink, a)          # noqa: E731
     amber = lambda a=1.0: look.css(look.amber, a)      # noqa: E731
+
+    def solid(c, a):
+        """A fill for a cell / box as an opaque color over the window background. Qt's rich text paints a CSS
+        `background` on <td> / <table> behind the text only (QA: a darker box around each word); the bgcolor attribute
+        fills the whole cell, but it takes no rgba(), so the soft tint is mixed with the background here."""
+        bg = look.bg
+        return "#%02x%02x%02x" % tuple(round((bg[i] * (1 - a) + c[i] * a) * 255) for i in range(3))
     out = [f'<div dir="rtl" style="color:{ink(0.86)}; font-size:14.5px;">']
     for b in blocks:
         if b.kind == "heading":
@@ -141,10 +148,10 @@ def to_html(blocks: list[Block], look, base_dir: str = "") -> str:
             body = inline(b.text, amber())
             if b.done:
                 body = f'<s style="color:{ink(0.5)};">{body}</s>'
-            out.append(f'<table width="100%" cellpadding="7" style="margin:3px 0; background:{ink(0.045)};"><tr>'
-                       f'<td>{box}&nbsp;&nbsp;{body}</td></tr></table>')
+            out.append(f'<table width="100%" cellpadding="7" style="margin:3px 0;"><tr>'
+                       f'<td bgcolor="{solid(look.ink, 0.045)}">{box}&nbsp;&nbsp;{body}</td></tr></table>')
         elif b.kind == "quote":
-            out.append(f'<table cellpadding="0" style="margin:4px 0;"><tr><td width="3" style="background:{amber(0.7)};"></td>'
+            out.append(f'<table cellpadding="0" style="margin:4px 0;"><tr><td width="3" bgcolor="{solid(look.amber, 0.7)}"></td>'
                        f'<td style="padding-right:10px; color:{ink(0.7)};">{inline(b.text, amber())}</td></tr></table>')
         elif b.kind == "rule":
             out.append(f'<hr style="background:{ink(0.1)}; height:1px; border:none;"/>')
@@ -156,9 +163,10 @@ def to_html(blocks: list[Block], look, base_dir: str = "") -> str:
                 # Qt lays out a full-width rich-text table left to right whatever the direction: first column on the right
                 cells = list(reversed(r + [""] * (cols - len(r))))
                 tag = "th" if i == 0 else "td"
-                bg = f"background:{amber(0.16)};" if i == 0 else (f"background:{ink(0.03)};" if i % 2 == 0 else "")
+                bg = solid(look.amber, 0.16) if i == 0 else (solid(look.ink, 0.03) if i % 2 == 0 else "")
+                fill = f' bgcolor="{bg}"' if bg else ""
                 out.append("<tr>" + "".join(
-                    f'<{tag} align="right" style="{bg} border-bottom:1px solid {ink(0.08)}; font-weight:{700 if i == 0 else 400};">'
+                    f'<{tag} align="right"{fill} style="border-bottom:1px solid {ink(0.08)}; font-weight:{700 if i == 0 else 400};">'
                     f"{inline(c, amber())}</{tag}>" for c in cells) + "</tr>")
             out.append("</table>")
         elif b.kind == "image":

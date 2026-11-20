@@ -35,6 +35,8 @@ $ProgressPreference = "SilentlyContinue"
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+$env:HF_HUB_DISABLE_PROGRESS_BARS = "1"
+$env:PYTHONWARNINGS = "ignore"
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DefaultAppDir = Join-Path $env:LOCALAPPDATA "Timmy"
@@ -51,12 +53,25 @@ function Ok([string]$m) { Write-Host "  ✓ $m" }
 function Warn([string]$m) { Write-Host "  ! $m" }
 function Fail([string]$m) { Write-Host "✗ $m"; exit 1 }
 
+# PowerShell 5.1: with ErrorActionPreference Stop, any stderr line of a native program that is redirected (2>&1) is a
+# terminating NativeCommandError (tqdm progress bars, Python warnings). Native calls therefore run under Continue, and
+# the helper sends its own stderr to logs\install_helper.log (stderr lines that still arrive are ErrorRecords: "$_").
 function Helper([string[]]$HelperArgs) {
     # one JSON line from timmy.install_helper; never pass empty strings to a native program (PowerShell 5.1 drops them)
-    $out = & $Py -m timmy.install_helper @HelperArgs 2>&1
-    $line = ($out | Where-Object { "$_".StartsWith("{") } | Select-Object -Last 1)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { $out = @(& $Py -m timmy.install_helper @HelperArgs 2>&1 | ForEach-Object { "$_" }) }
+    finally { $ErrorActionPreference = $prev }
+    $line = ($out | Where-Object { $_.StartsWith("{") } | Select-Object -Last 1)
     if (-not $line) { return @{ ok = $false; error = ($out -join "`n") } }
     return ($line | ConvertFrom-Json)
+}
+
+function Native([scriptblock]$Block) {
+    # uv / python without redirection: same rule, a stderr line must never stop the script ($LASTEXITCODE decides)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $Block } finally { $ErrorActionPreference = $prev }
 }
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -117,12 +132,13 @@ if (-not $uv) {
 Ok "uv: $uv"
 $env:UV_PYTHON_INSTALL_DIR = Join-Path $AppDir "python"
 if (-not (Test-Path $Py)) {
-    & $uv venv --quiet --python 3.12 $Venv
+    Native { & $uv venv --quiet --python 3.12 $Venv }
     if ($LASTEXITCODE -ne 0) { Fail "יצירת סביבת Python נכשלה." }
 }
-& $uv pip install --quiet --python $Py --reinstall-package timmy-windows "$($Here)[audio,asr,ui,system]"
+Native { & $uv pip install --quiet --python $Py --reinstall-package timmy-windows "$($Here)[audio,asr,ui,system]" }
 if ($LASTEXITCODE -ne 0) { Fail "ההתקנה של החבילות נכשלה. בדוק את החיבור לאינטרנט והרץ שוב (ממשיך מאיפה שעצר)." }
-$ver = & $Py -m timmy --version
+$ver = Native { & $Py -m timmy --version 2>$null }
+if ($LASTEXITCODE -ne 0) { Fail "טימי לא עולה אחרי ההתקנה. הרץ שוב." }
 Ok "טימי $ver"
 
 # ---------------------------------------------------------------------------------------------------------------------

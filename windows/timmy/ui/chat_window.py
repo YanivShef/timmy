@@ -10,13 +10,13 @@ import os
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFontMetrics, QIcon, QPixmap
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy,
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy,
                                QVBoxLayout, QWidget)
 
 from timmy.chat import memory, skills
 from timmy.chat.improve import TimmyChat
 from timmy.chat.pdf_design import PDFDesign
-from timmy.ui import shell
+from timmy.ui import pickers, shell
 from timmy.ui import theme as T
 from timmy.ui.bridge import Bridge
 from timmy.ui.calls_window import ASSETS, CREATOR_URL, he, image, label
@@ -326,7 +326,7 @@ class TimmyChatWindow(ChatBase):
         self.refresh()
 
     def attach(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "צרף קבצים", os.path.expanduser("~"), ATTACH_FILTER)
+        files = pickers.open_files(self, "צרף קבצים", os.path.expanduser("~"), ATTACH_FILTER)
         if files:
             self.m.add_attachments(files)
 
@@ -452,12 +452,12 @@ class PdfDesignWindow(ChatBase):
 
     # ---- actions ----------------------------------------------------------------------------------------------
     def attach_logo(self):
-        f, _ = QFileDialog.getOpenFileName(self, "בחר את הלוגו של העסק", os.path.expanduser("~"), LOGO_FILTER)
+        f = pickers.open_file(self, "בחר את הלוגו של העסק", os.path.expanduser("~"), LOGO_FILTER)
         if f:
             self.m.attach_logo(f)
 
     def pick_pdf(self):
-        f, _ = QFileDialog.getOpenFileName(self, "בחר PDF שאתה אוהב את העיצוב שלו", os.path.expanduser("~"), "PDF (*.pdf)")
+        f = pickers.open_file(self, "בחר PDF שאתה אוהב את העיצוב שלו", os.path.expanduser("~"), "PDF (*.pdf)")
         if f:
             self.m.create_skill(f)
 

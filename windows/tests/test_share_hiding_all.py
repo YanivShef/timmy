@@ -4,7 +4,7 @@
    the WhatsApp send dialog, both chats, "עיצוב ה-PDF", the onboarding); every visible top-level window must have been
    given hide=True, and the menu switch must turn all of them off and back on.
 2. Windows only (native QPA, own process, tests/share_probe_app.py): GetWindowDisplayAffinity on every visible
-   top-level window the process owns must read 0x11, including the native folder picker.
+   top-level window the process owns must read 0x11, including the folder picker (ui/pickers.py).
 """
 import json
 import os
@@ -87,6 +87,37 @@ def test_every_app_window_gets_the_share_affinity(qapp, rec_with_call, fake_clau
         t.tray.hide()
 
 
+def test_file_pickers_are_qt_windows_while_hiding_is_on(qapp, app_dir, monkeypatch):
+    """The static QFileDialog calls open the native shell dialog, which the event filter never sees (QA). Every
+    picker goes through ui/pickers.py: Qt's own dialog while hiding is on (and so hidden), the native one when off."""
+    import re
+
+    from PySide6.QtWidgets import QFileDialog
+
+    from timmy import config as tconfig
+    from timmy.ui import pickers
+    from timmy.ui.app import ShareHider
+    calls = []
+    hider = ShareHider(True, setter=lambda hwnd, hide: (calls.append((int(hwnd), hide)), True)[1])
+    qapp.installEventFilter(hider)
+    try:
+        d = pickers.make_dialog(None, "בחר את תיקיית ההקלטות", str(app_dir), mode=QFileDialog.FileMode.Directory)
+        assert d.testOption(QFileDialog.Option.DontUseNativeDialog)
+        d.open()
+        assert wait_until(qapp, lambda: (int(d.winId()), True) in calls, 3), calls
+        d.reject()
+        f = pickers.make_dialog(None, "צרף קבצים", name_filter="קבצים (*.pdf);;תמונות (*.png)")
+        assert f.nameFilters() == ["קבצים (*.pdf)", "תמונות (*.png)"]
+        tconfig.save({"hide_in_screen_share": False})
+        assert not pickers.make_dialog(None, "x").testOption(QFileDialog.Option.DontUseNativeDialog)
+    finally:
+        qapp.removeEventFilter(hider)
+    # no other code opens a file dialog by itself
+    for py in (WIN / "timmy").rglob("*.py"):
+        if py.name != "pickers.py":
+            assert not re.search(r"QFileDialog\.get\w+\(", py.read_text(encoding="utf-8")), py
+
+
 @pytest.fixture(scope="module")
 def native_probe(tmp_path_factory, out_dir):
     if sys.platform != "win32":
@@ -126,8 +157,9 @@ def test_native_every_visible_window_reads_exclude_from_capture(native_probe):
 
 @pytest.mark.windows_only
 def test_native_folder_picker_is_hidden_too(native_probe):
-    """The onboarding / chat file pickers are the native Windows dialog (not a Qt widget), so the event filter never
-    sees them. A picker opened during a call would show in Meet's "share entire screen"."""
+    """The onboarding / chat file pickers: the native Windows dialog is not a Qt widget, so the event filter never
+    sees it and a picker opened during a call would show in Meet's "share entire screen". ui/pickers.py therefore uses
+    Qt's own dialog while hiding is on; this reads the real affinity of whatever the picker opened."""
     res = native_probe
     assert res["dialog"], f"the folder picker did not open: {res}"
     bad = [w for w in res["dialog"] if w["affinity"] != 0x11]

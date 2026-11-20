@@ -127,7 +127,7 @@ class _Rich(QLabel):
 class _Scroll(QScrollArea):
     """Scroll area that sticks to the bottom while new content arrives (unless the user scrolled up)."""
 
-    def __init__(self, inner: QWidget, fade: QColor, parent=None):
+    def __init__(self, inner: QWidget, fade: QColor, parent=None, bottom_fade: bool = False):
         super().__init__(parent)
         self.setWidget(inner)
         self.setWidgetResizable(True)
@@ -138,6 +138,8 @@ class _Scroll(QScrollArea):
         self.viewport().setAutoFillBackground(False)
         inner.setAutoFillBackground(False)
         self.fade = G.TopFade(fade, 14, self.viewport())
+        # the key points box: a line cut at the bottom edge fades out instead of ending mid-line (QA)
+        self.fade_bottom = G.TopFade(fade, 18, self.viewport(), bottom=True) if bottom_fade else None
         self._stick = True
         self.verticalScrollBar().rangeChanged.connect(self._range)
         self.verticalScrollBar().valueChanged.connect(self._moved)
@@ -145,15 +147,41 @@ class _Scroll(QScrollArea):
     def _moved(self, v):
         sb = self.verticalScrollBar()
         self._stick = v >= sb.maximum() - 4
+        self._fades()
 
     def _range(self, _lo, hi):
         if self._stick:
             self.verticalScrollBar().setValue(hi)
+        self._fades()
+
+    def to_bottom_if_stuck(self):
+        """After new content: the range may only change on the next layout pass, so scroll once more then."""
+        if self._stick:
+            QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+
+    def set_fade_color(self, c: QColor):
+        self.fade.color = c
+        if self.fade_bottom:
+            self.fade_bottom.color = c
+        self._fades()
+
+    def _fades(self):
+        sb = self.verticalScrollBar()
+        if self.fade_bottom:
+            self.fade_bottom.setVisible(sb.value() < sb.maximum())
+            self.fade.setVisible(sb.value() > 0)
+            self.fade_bottom.update()
+        self.fade.update()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self.fade.setGeometry(0, 0, self.viewport().width(), 14)
         self.fade.raise_()
+        if self.fade_bottom:
+            h = self.fade_bottom.height()
+            self.fade_bottom.setGeometry(0, self.viewport().height() - h, self.viewport().width(), h)
+            self.fade_bottom.raise_()
+        self._fades()
 
 
 class CardBody(QWidget):
@@ -175,7 +203,7 @@ class CardBody(QWidget):
         self.notes_head = _Rich(self.notes)
         nl.addWidget(self.notes_head)
         self.bullets = _Rich()
-        self.bullets_scroll = _Scroll(self.bullets, QColor(0, 0, 0, 0), self.notes)
+        self.bullets_scroll = _Scroll(self.bullets, QColor(0, 0, 0, 0), self.notes, bottom_fade=True)
         nl.addWidget(self.bullets_scroll, 1)
         lay.addWidget(self.notes)
 
@@ -197,7 +225,8 @@ class CardBody(QWidget):
         ink = look.q(look.ink)
         self.notes.setStyleSheet(f"QFrame {{ background: {look.css(look.ink, 0.07)}; border-radius: 12px; }}")
         self.scroll.fade.color = look.q(look.bg)
-        self.bullets_scroll.fade.color = alpha(look.q(look.bg), 0.0)
+        # the notes panel is ink at 7 % over the card: its fades need that exact opaque color
+        self.bullets_scroll.set_fade_color(QColor.fromRgbF(*(look.bg[i] * 0.93 + look.ink[i] * 0.07 for i in range(3))))
         self.dots.ink = ink
         self.dots.animate = look.animations
         self.notes_head.setText(
@@ -217,6 +246,7 @@ class CardBody(QWidget):
         else:
             rows = f'<p style="color:{ink(0.3)}; font-size:12.5px;">הנקודות יופיעו תוך דקה…</p>'
         self.bullets.setText(f'<div dir="rtl">{rows}</div>')
+        self.bullets_scroll.to_bottom_if_stuck()
         # transcript
         parts, prev = [], None
         for ln in r.lines[-300:]:

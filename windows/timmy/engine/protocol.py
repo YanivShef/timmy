@@ -21,6 +21,7 @@ MAX_SAMPLES = SR * 60           # sanity cap per frame (a frame is normally 10 t
 
 EVENT_TYPES = frozenset({
     "loading", "ready", "partial", "final", "bullets", "saving", "done", "diskfull", "restyled",
+    "error",                    # Windows only: the model could not start (timmy.engine.worker, exit code 3)
 })
 
 
