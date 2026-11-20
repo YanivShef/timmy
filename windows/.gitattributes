@@ -1,0 +1,2 @@
+# the PowerShell scripts keep their exact bytes: UTF-8 with BOM (PowerShell 5.1 reads Hebrew right only with it) and CRLF
+*.ps1 -text

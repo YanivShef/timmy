@@ -4,7 +4,8 @@ a tray icon with the menu, and the windows (DESIGN.md 7).
 Menu (tray icon and right click on the island; the Mac right-click menu): while recording "בטל הקלטה" (with an
 explicit confirmation item), hide / show the live transcript, "להסתיר את טימי בשיתוף מסך" (on by default),
 "השיחות שלי…", "פתח תיקיית הקלטות", "שפר את טימי…", "עצב את טימי…", "הרשאות והגדרה (טימי)", "הפעל עם הכניסה
-למחשב", "יציאה". The chats and onboarding arrive in build step 4: until then their items are disabled.
+למחשב", "יציאה". Build step 4 registers the chats and the onboarding (`step4`); the first launch (no
+`onboarding_done` in config.json) opens the onboarding by itself, unless started with --background.
 
 Screen-share hiding: ShareHider is an application event filter that sets WDA_EXCLUDEFROMCAPTURE on every top-level
 window when it is shown or gets a new native handle (island, windows, menus, tooltips, dialogs), so nothing can be
@@ -78,7 +79,9 @@ class TimmyApp(QObject):
         self.island = Island(self.rec)
         self.island.menu_requested.connect(self.popup_menu)
         self.calls_window = None
-        self.step4 = {}                 # build step 4 registers: improve / design / onboarding handlers
+        self.chats = {}                 # "improve" / "design" -> TimmyChatWindow, "pdf" -> PdfDesignWindow
+        self.onboarding = None
+        self.step4 = {"improve": self.open_improve, "design": self.open_design, "onboarding": self.open_onboarding}
         self.tray = QSystemTrayIcon(QIcon(os.path.join(ASSETS, "timmy.png")), self)
         self.tray.setToolTip("טימי")
         self.menu = QMenu()
@@ -100,6 +103,8 @@ class TimmyApp(QObject):
             self.tray.show()
         self.island.show()
         self.island.place()
+        if not background and not tconfig.load().get("onboarding_done"):
+            QTimer.singleShot(400, self.open_onboarding)
 
     # ---- look ---------------------------------------------------------------------------------------------------
     def restyle(self, look: T.Look):
@@ -131,7 +136,7 @@ class TimmyApp(QObject):
             a = m.addAction(title)
             fn = self.step4.get(key)
             if fn:
-                a.triggered.connect(fn)
+                a.triggered.connect(lambda _checked=False, fn=fn: fn())
             else:
                 a.setEnabled(False)
                 a.setToolTip("יגיע בעדכון הבא של טימי לווינדוס")
@@ -168,19 +173,62 @@ class TimmyApp(QObject):
             if "design" in self.step4:
                 self.calls_window.design_btn.setVisible(True)
                 self.calls_window.open_design.connect(self.step4["design"])
-        w = self.calls_window
+            add_whatsapp(self.calls_window)
+        self._front(self.calls_window)
+
+    @staticmethod
+    def _front(w):
         w.show()
         w.raise_()
         w.activateWindow()
+
+    # ---- build step 4: chats and onboarding ----------------------------------------------------------------------
+    def chat(self, key: str):
+        from timmy.ui.chat_window import PdfDesignWindow, TimmyChatWindow
+        w = self.chats.get(key)
+        if w is None:
+            w = PdfDesignWindow() if key == "pdf" else TimmyChatWindow(key == "design", open_pdf_design=self.open_pdf_design,
+                                                                         set_share_hiding=self.set_hide_in_share)
+            self.chats[key] = w
+        return w
+
+    def open_improve(self):
+        self._front(self.chat("improve"))
+
+    def open_design(self):
+        self._front(self.chat("design"))
+
+    def open_pdf_design(self, send=None, logo=None, adopt=None, then=None, create_from=None, pick=False):
+        """The "עיצוב ה-PDF" chat, opened by "שפר את טימי": a design request (+ the logo file), a skill to adopt, a sample
+        PDF to build a design skill from (or the file picker)."""
+        w = self.chat("pdf")
+        quiet = adopt is not None or create_from is not None or pick
+        w.start(quiet=quiet)
+        self._front(w)
+        if adopt is not None:
+            w.m.adopt_skill(adopt, then=then)
+        elif send:
+            w.m.send(send, logo=w.m.copy_logo(logo) if logo else None)
+        if create_from:
+            w.m.create_skill(create_from)
+        elif pick:
+            QTimer.singleShot(300, w.pick_pdf)
+
+    def open_onboarding(self, step: int | None = None):
+        from timmy.ui.onboarding import OnboardingWindow
+        if self.onboarding is None:
+            self.onboarding = OnboardingWindow(set_share_hiding=self.set_hide_in_share)
+        if step is not None:
+            self.onboarding.show_step(step)
+        self._front(self.onboarding)
 
     def _calls_changed(self):
         if self.calls_window is not None and self.calls_window.isVisible():
             self.calls_window.reload_if_changed()
 
     def _no_space(self):
-        if self.tray.isVisible():
-            self.tray.showMessage("טימי", "אין מספיק מקום פנוי בדיסק כדי להתחיל הקלטה (צריך לפחות 500MB). "
-                                          "אפשר לפנות מקום או לבחור תיקיית הקלטות בדיסק אחר.", QSystemTrayIcon.MessageIcon.Warning, 8000)
+        """Not enough space to start: the folder step of the onboarding (the Mac opens the same step)."""
+        self.open_onboarding(4)
 
     def handle_message(self, msg: str):
         if msg in ("show", "calls"):
@@ -188,6 +236,29 @@ class TimmyApp(QObject):
 
     def quit(self):
         self.app.quit()
+
+
+def add_whatsapp(win) -> None:
+    """"שלח בוואטסאפ" next to "הורד PDF" in "השיחות שלי" (Mac CallDetailPane)."""
+    from PySide6.QtWidgets import QPushButton
+
+    from timmy.ui.calls_window import he
+    b = QPushButton(he("\U0001f4ac שלח בוואטסאפ"))
+    b.setObjectName("primary")
+    b.setToolTip("טימי מנסח הודעה ללקוח, אתה מאשר, ורק אז הוא שולח")
+
+    def open_send():
+        from timmy.ui.send_whatsapp import SendDialog, pdf_builder
+        c = win.selected()
+        if c is None:
+            return
+        d = SendDialog(c, win, build_pdf=pdf_builder(win))
+        win._send_dialog = d
+        d.finished.connect(lambda _r: win.reload_if_changed())
+        d.open()
+    b.clicked.connect(open_send)
+    win.extra_actions.insertWidget(0, b)
+    win.whatsapp_btn = b
 
 
 def make_app(argv=None) -> QApplication:

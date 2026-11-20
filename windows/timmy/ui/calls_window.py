@@ -4,7 +4,7 @@ Right: search + the list (title, "עם: ...", date and length). Left: the select
 Enter saves, Esc cancels, the files are renamed too), date / length / person chips, actions ("הורד PDF",
 "תמלול מלא", "פתח בתיקייה"), the PDF status line, and the summary. Above: the model pickers for summaries and the
 live key points. The folder is checked every 2 s, so a call saved while the window is open appears by itself.
-WhatsApp, the chats and images in the PDF are added in build step 4 (hooks: `extra_actions`).
+Build step 4 adds "שלח בוואטסאפ" (ui/app.py add_whatsapp, into `extra_actions`) and "עצב את טימי" (`open_design`).
 """
 from __future__ import annotations
 

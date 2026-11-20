@@ -157,6 +157,64 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  installer:
+    name: install.ps1 + uninstall.ps1 (temp folder, tiny model)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Hebrew values go through the environment (the inline scripts stay ASCII, whatever encoding the runner saves them in)
+    env:
+      T_NAME: "בדיקה"
+      T_PEOPLE: "דנה כהן, אבי לוי"
+      T_REC: "הקלטות"
+    steps:
+      - uses: actions/checkout@v4
+      # Windows PowerShell 5.1 (powershell.exe), the one every user has; no setup-python: the script gets uv and Python itself
+      - name: Dry run
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File windows\install.ps1 -Name $env:T_NAME -AppDir "$env:RUNNER_TEMP\Timmy App" -DryRun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install (no shortcuts, no login item, no launch, tiny model)
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File windows\install.ps1 -Name $env:T_NAME -People $env:T_PEOPLE `
+            -AppDir "$env:RUNNER_TEMP\Timmy App" -OutputDir (Join-Path $env:RUNNER_TEMP $env:T_REC) -Model "Systran/faster-whisper-tiny" `
+            -NoShortcuts -NoStartup -NoLaunch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check the installed app
+        shell: powershell
+        run: |
+          $app = "$env:RUNNER_TEMP\Timmy App"
+          $env:TIMMY_APP_DIR = $app
+          $py = "$app\venv\Scripts\python.exe"
+          & $py -m timmy --version
+          & $py -m timmy --report
+          $cfg = Get-Content "$app\config.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+          $cfg | ConvertTo-Json
+          $rec = Join-Path $env:RUNNER_TEMP $env:T_REC
+          if ($cfg.owner_name -ne $env:T_NAME) { throw "owner_name" }
+          if ($cfg.output_dir -ne $rec) { throw "output_dir" }
+          if ($cfg.people.Count -ne 2) { throw "people" }
+          if (-not (Test-Path -LiteralPath $rec)) { throw "recordings folder" }
+          if (-not (Test-Path "$app\install.json")) { throw "install.json" }
+          & $py -c "from timmy.engine import asr, files; from timmy import config; c = config.load(); print(asr.resolve_model(c, download=False)); print(files.ffmpeg_path(c))"
+          if ($LASTEXITCODE -ne 0) { throw "model / ffmpeg" }
+      - name: Re-run keeps the user's folder and name
+        shell: powershell
+        run: |
+          $app = "$env:RUNNER_TEMP\Timmy App"
+          powershell -NoProfile -ExecutionPolicy Bypass -File windows\install.ps1 -AppDir $app -Model "Systran/faster-whisper-tiny" -NoShortcuts -NoStartup -NoLaunch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cfg = Get-Content "$app\config.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($cfg.output_dir -ne (Join-Path $env:RUNNER_TEMP $env:T_REC) -or $cfg.owner_name -ne $env:T_NAME) { throw "re-run changed the config" }
+      - name: Uninstall
+        shell: powershell
+        run: |
+          $app = "$env:RUNNER_TEMP\Timmy App"
+          powershell -NoProfile -ExecutionPolicy Bypass -File windows\uninstall.ps1 -AppDir $app
+          if (Test-Path $app) { throw "app folder left behind" }
+          if (-not (Test-Path -LiteralPath (Join-Path $env:RUNNER_TEMP $env:T_REC))) { throw "the recordings folder must stay" }
+
   asr-bench:
     name: ASR speed on runner CPU (on demand)
     if: github.event_name == 'workflow_dispatch' && inputs.asr_bench

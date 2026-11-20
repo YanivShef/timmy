@@ -38,6 +38,9 @@ def repo_root():
 
 
 os.environ.setdefault("PYTHONUTF8", "1")
+# never the real Credential Manager / Keychain (the Mac app keeps its Greenolink item under the same service name)
+os.environ["TIMMY_SECRETS"] = "memory"
+os.environ.setdefault("TIMMY_GREENOLINK_BASE", "http://127.0.0.1:9")   # tests that forget the mock never reach the real server
 
 
 def make_fake_claude(folder: Path) -> Path:

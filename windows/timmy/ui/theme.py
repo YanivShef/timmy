@@ -187,6 +187,10 @@ QLineEdit {{ color: {c(ink)}; background: {c(ink, 0.07)}; border: 1px solid tran
             padding: 8px 12px; font-size: 13px; selection-background-color: {c(amber, 0.45)}; }}
 QLineEdit:focus {{ border: 1px solid {c(amber, 0.8)}; }}
 QLineEdit#title {{ font-size: 20px; font-weight: 700; padding: 6px 12px; }}
+QPlainTextEdit {{ color: {c(ink)}; background: {c(ink, 0.07)}; border: 1px solid transparent; border-radius: 10px;
+                 padding: 6px 8px; font-size: 14px; selection-background-color: {c(amber, 0.45)}; }}
+QPlainTextEdit:focus {{ border: 1px solid {c(amber, 0.8)}; }}
+QCheckBox {{ color: {c(ink, 0.88)}; font-size: 13px; spacing: 8px; background: transparent; }}
 QListWidget {{ background: transparent; border: none; outline: none; }}
 QListWidget::item {{ border-radius: 10px; margin: 2px 0px; }}
 QListWidget::item:selected {{ background: {c(ink, 0.1)}; }}
